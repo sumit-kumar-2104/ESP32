@@ -88,29 +88,43 @@ class ESP32Sensor:
             self._thread.join(timeout=2)
 
     def _poll_loop(self):
+        """Use Server-Sent Events (SSE) stream — same as the web dashboard uses."""
+        import json
         while self._running:
             try:
-                # Fetch movement score
-                r = requests.get(f"{self.base_url}/sensor/movement_score", timeout=1)
-                if r.status_code == 200:
-                    data = r.json()
+                # Connect to the SSE events stream
+                r = requests.get(f"{self.base_url}/events", stream=True, timeout=5)
+                if r.status_code != 200:
+                    raise ConnectionError(f"HTTP {r.status_code}")
+                with self._lock:
+                    self.connected = True
+                for line in r.iter_lines(decode_unicode=True):
+                    if not self._running:
+                        break
+                    if not line or not line.startswith('data:'):
+                        continue
+                    try:
+                        data = json.loads(line[5:].strip())
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    eid = data.get('id', '')
                     with self._lock:
-                        self.movement_score = float(data.get('value', 0))
-                        self.connected = True
                         self.last_update = time.time()
-
-                # Fetch motion state
-                r2 = requests.get(f"{self.base_url}/binary_sensor/motion_detected", timeout=1)
-                if r2.status_code == 200:
-                    data2 = r2.json()
-                    with self._lock:
-                        self.motion_detected = data2.get('state') == 'ON'
-
+                        if 'movement' in eid and data.get('value') is not None:
+                            try:
+                                self.movement_score = float(data['value'])
+                            except (ValueError, TypeError):
+                                pass
+                        elif 'motion' in eid:
+                            self.motion_detected = (
+                                data.get('state') == 'ON' or
+                                data.get('value') is True or
+                                data.get('value') == 1
+                            )
             except Exception:
                 with self._lock:
                     self.connected = False
-
-            time.sleep(0.3)  # ~3 polls/sec
+                time.sleep(1)  # wait before reconnecting
 
     def get_state(self):
         with self._lock:
