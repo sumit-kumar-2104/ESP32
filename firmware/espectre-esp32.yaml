@@ -1,0 +1,106 @@
+# =============================================================================
+# ESPectre - ESP32 (Original / WROOM-32) - STANDALONE WEB DASHBOARD CONFIG
+# =============================================================================
+# WiFi CSI-based human presence / motion detection.
+# This config runs WITHOUT Home Assistant: results are shown on a live web
+# dashboard in your browser (a gauge + on/off motion sensor) and streamed to
+# the serial monitor.
+#
+# Board:      ESP32-WROOM-32 (the classic 30/38-pin ESP32 dev board)
+# USB chip:   CP2102 or CH340 (that is why logger uses UART0 below)
+# View at:    http://espectre.local   (or http://<device-ip>)
+#
+# HOW TO FLASH (from the "firmware" folder, venv activated):
+#   esphome run espectre-esp32.yaml
+#
+# NOTE ON THE 2 ESP32 BOARDS YOU BOUGHT:
+#   ESPectre needs only ONE ESP32 + your existing 2.4 GHz WiFi router.
+#   The ESP32 connects to your router and generates its own WiFi traffic
+#   (pings the router) to measure Channel State Information (CSI). The second
+#   ESP32 is a spare / a second sensing point in another room - it is NOT a
+#   transmitter you have to wire up.
+# =============================================================================
+
+substitutions:
+  git_ref: main                 # espectre version: branch, tag, or commit
+  detection_algorithm: mvs      # mvs (variance, default) or ml (neural net)
+
+esphome:
+  name: espectre
+  friendly_name: ESPectre
+  min_version: 2026.5.0
+
+esp32:
+  board: esp32dev               # ESP32-WROOM-32 dev board
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+# Use the ESPectre component BUNDLED in this folder (../components) so the
+# firmware builds even with no internet. This makes the folder self-contained.
+#
+# If you ever want the latest version from GitHub instead, comment out the
+# "local" block below and uncomment the "git" block.
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+  # - source:
+  #     type: git
+  #     url: https://github.com/francescopace/espectre
+  #     ref: ${git_ref}
+  #   components: [ espectre ]
+  #   refresh: always
+
+# -----------------------------------------------------------------------------
+# ESPectre CSI motion detection
+# -----------------------------------------------------------------------------
+espectre:
+  id: espectre_csi
+  detection_algorithm: ${detection_algorithm}
+  traffic_generator_rate: 100   # packets/sec used to probe the channel (0-1000)
+  traffic_generator_mode: ping  # ping (default) or dns
+  # These names are what you will see on the web dashboard:
+  movement_sensor:
+    name: "Movement Score"      # 0-10 intensity of detected motion
+  motion_sensor:
+    name: "Motion Detected"     # on/off presence
+  threshold_number:
+    name: "Threshold"           # detection sensitivity (adjust live)
+  calibrate_switch:
+    name: "Calibrate"           # re-run baseline calibration
+
+# -----------------------------------------------------------------------------
+# WiFi - reads your network name/password from secrets.yaml
+# -----------------------------------------------------------------------------
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+      # bssid: !secret wifi_bssid   # optional: lock to one access point (mesh)
+  # Fallback hotspot if it cannot join your WiFi (connect to configure)
+  ap:
+    ssid: "ESPectre Fallback"
+
+captive_portal:
+
+# -----------------------------------------------------------------------------
+# Standalone web dashboard  ->  http://espectre.local
+# -----------------------------------------------------------------------------
+web_server:
+  port: 80
+  version: 3
+  # local: true   # uncomment to embed the UI in flash (works fully offline)
+
+# -----------------------------------------------------------------------------
+# Serial logging - UART0 is required for CP2102 / CH340 USB bridges so you can
+# see the live CSI / movement numbers in the terminal.
+# -----------------------------------------------------------------------------
+logger:
+  level: INFO
+  hardware_uart: UART0
+
+# Over-the-air updates (so you can re-flash over WiFi after the first USB flash)
+ota:
+  - platform: esphome

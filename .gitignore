@@ -1,0 +1,5 @@
+# Build tool + artifacts (do not zip/commit these; they are regenerated locally)
+venv/
+firmware/.esphome/
+firmware/secrets.yaml
+*.bin
