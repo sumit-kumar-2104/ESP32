@@ -23,7 +23,7 @@
 
 substitutions:
   git_ref: main                 # espectre version: branch, tag, or commit
-  detection_algorithm: mvs      # mvs (variance, default) or ml (neural net)
+  detection_algorithm: ml       # ml = no calibration, starts in ~3 sec
 
 esphome:
   name: espectre
@@ -98,8 +98,11 @@ web_server:
 # see the live CSI / movement numbers in the terminal.
 # -----------------------------------------------------------------------------
 logger:
-  level: INFO
+  level: DEBUG
   hardware_uart: UART0
+  logs:
+    sensor: INFO
+    binary_sensor: INFO
 
 # Over-the-air updates (so you can re-flash over WiFi after the first USB flash)
 ota:
