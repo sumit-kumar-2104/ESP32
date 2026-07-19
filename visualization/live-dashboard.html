@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 WiFi Sensing — Live Visualization</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0a0e1a;
+    color: #e0e0e0;
+    overflow-x: hidden;
+  }
+  .header {
+    text-align: center;
+    padding: 20px;
+    background: linear-gradient(135deg, #0d1330, #1a1040);
+    border-bottom: 1px solid #2a2a4a;
+  }
+  .header h1 { font-size: 1.6em; color: #7eb8ff; letter-spacing: 1px; }
+  .header p { font-size: 0.85em; color: #888; margin-top: 4px; }
+
+  /* Connection bar */
+  .conn-bar {
+    display: flex; justify-content: center; gap: 20px;
+    padding: 12px; background: #0d1020; border-bottom: 1px solid #1a1a3a;
+    flex-wrap: wrap;
+  }
+  .conn-bar label { color: #999; font-size: 0.85em; }
+  .conn-bar input {
+    background: #151830; border: 1px solid #2a2a5a; color: #ccc;
+    padding: 5px 10px; border-radius: 4px; width: 200px; font-size: 0.85em;
+  }
+  .conn-bar button {
+    background: #2563eb; color: #fff; border: none; padding: 6px 18px;
+    border-radius: 4px; cursor: pointer; font-size: 0.85em;
+  }
+  .conn-bar button:hover { background: #3b82f6; }
+  .conn-bar button.disconnect { background: #dc2626; }
+  .conn-bar .status {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle;
+  }
+  .status.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+  .status.disconnected { background: #666; }
+  .status.error { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+  /* Main grid */
+  .dashboard {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { .dashboard { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(145deg, #111630, #0d1025);
+    border: 1px solid #1e2248;
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card h3 {
+    font-size: 0.9em; color: #6b8cce; text-transform: uppercase;
+    letter-spacing: 1.5px; margin-bottom: 12px;
+  }
+
+  /* Room visualization */
+  .room-viz { grid-column: 1 / -1; min-height: 250px; }
+  .room-container {
+    position: relative; width: 100%; height: 220px;
+    border: 2px solid #2a2a5a; border-radius: 8px;
+    background: #080c18; overflow: hidden;
+  }
+  .room-label {
+    position: absolute; top: 8px; left: 12px;
+    font-size: 0.75em; color: #556; text-transform: uppercase; letter-spacing: 1px;
+  }
+  .wifi-waves {
+    position: absolute; top: 50%; left: 15%;
+    transform: translate(-50%, -50%);
+  }
+  .wifi-waves .wave {
+    position: absolute; border: 2px solid rgba(59, 130, 246, 0.3);
+    border-radius: 50%; animation: wave-pulse 2s ease-out infinite;
+  }
+  .wifi-waves .wave:nth-child(1) { width: 30px; height: 30px; top: -15px; left: -15px; }
+  .wifi-waves .wave:nth-child(2) { width: 60px; height: 60px; top: -30px; left: -30px; animation-delay: 0.3s; }
+  .wifi-waves .wave:nth-child(3) { width: 90px; height: 90px; top: -45px; left: -45px; animation-delay: 0.6s; }
+  .wifi-waves .wave:nth-child(4) { width: 120px; height: 120px; top: -60px; left: -60px; animation-delay: 0.9s; }
+  @keyframes wave-pulse {
+    0% { opacity: 0.8; transform: scale(1); }
+    100% { opacity: 0; transform: scale(1.5); }
+  }
+
+  .router-icon, .esp-icon {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    font-size: 1.8em; text-align: center;
+  }
+  .router-icon { left: 8%; }
+  .esp-icon { right: 8%; }
+  .device-label {
+    font-size: 0.45em; display: block; color: #668; margin-top: 2px;
+  }
+
+  /* Person silhouette */
+  .person {
+    position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%);
+    transition: opacity 0.5s, filter 0.5s;
+  }
+  .person svg { width: 50px; height: 80px; }
+  .person .glow {
+    position: absolute; top: -10px; left: -10px; right: -10px; bottom: -10px;
+    border-radius: 50%; filter: blur(15px);
+    transition: background 0.5s, opacity 0.5s;
+  }
+
+  /* Disturbance lines */
+  .disturbance-overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none; overflow: hidden;
+  }
+  .disturbance-line {
+    position: absolute; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(239,68,68,0.4), transparent);
+    animation: disturb 0.8s ease-in-out;
+    opacity: 0;
+  }
+  @keyframes disturb {
+    0% { opacity: 0; transform: scaleX(0.3); }
+    50% { opacity: 1; transform: scaleX(1); }
+    100% { opacity: 0; transform: scaleX(0.3); }
+  }
+
+  /* Big score display */
+  .big-score {
+    text-align: center; padding: 10px 0;
+  }
+  .big-score .value {
+    font-size: 4em; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    transition: color 0.3s;
+  }
+  .big-score .label { font-size: 0.8em; color: #668; margin-top: 4px; }
+  .score-idle { color: #22c55e; }
+  .score-low { color: #eab308; }
+  .score-mid { color: #f97316; }
+  .score-high { color: #ef4444; }
+
+  /* Motion indicator */
+  .motion-badge {
+    display: inline-block; padding: 8px 24px; border-radius: 20px;
+    font-size: 1.1em; font-weight: 600; text-align: center;
+    margin-top: 10px; transition: all 0.3s;
+  }
+  .motion-on {
+    background: rgba(239, 68, 68, 0.15); color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.2);
+    animation: pulse-red 1.5s ease-in-out infinite;
+  }
+  .motion-off {
+    background: rgba(34, 197, 94, 0.1); color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+  @keyframes pulse-red {
+    0%, 100% { box-shadow: 0 0 10px rgba(239,68,68,0.2); }
+    50% { box-shadow: 0 0 25px rgba(239,68,68,0.4); }
+  }
+
+  /* Chart */
+  .chart-container { width: 100%; height: 200px; position: relative; }
+  canvas { width: 100% !important; height: 100% !important; }
+
+  /* Stats row */
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    grid-column: 1 / -1;
+  }
+  .stat-box {
+    background: #0d1025; border: 1px solid #1e2248; border-radius: 8px;
+    padding: 14px; text-align: center;
+  }
+  .stat-box .val {
+    font-size: 1.6em; font-weight: 700; color: #7eb8ff;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-box .lbl { font-size: 0.7em; color: #556; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+  @media (max-width: 600px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+
+  /* Event log */
+  .event-log {
+    grid-column: 1 / -1; max-height: 180px; overflow-y: auto;
+  }
+  .event-log table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+  .event-log th {
+    text-align: left; color: #556; padding: 6px 8px;
+    border-bottom: 1px solid #1e2248; position: sticky; top: 0;
+    background: #111630;
+  }
+  .event-log td { padding: 4px 8px; border-bottom: 1px solid #0d1025; }
+  .event-log tr.motion-row { color: #ef4444; }
+  .event-log tr.idle-row { color: #22c55e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📡 ESP32 WiFi CSI — Live Room Sensing</h1>
+  <p>Real-time human presence detection via WiFi signal disturbance</p>
+</div>
+
+<!-- Connection bar -->
+<div class="conn-bar">
+  <div>
+    <label>ESP32 Address:</label><br>
+    <input type="text" id="esp-host" value="espectre.local" placeholder="IP or hostname">
+  </div>
+  <div style="display:flex;align-items:flex-end;gap:8px;">
+    <button id="btn-connect" onclick="toggleConnection()">Connect</button>
+    <span><span class="status disconnected" id="conn-status"></span><span id="conn-text">Disconnected</span></span>
+  </div>
+</div>
+
+<div class="dashboard">
+
+  <!-- Room visualization -->
+  <div class="card room-viz">
+    <h3>Room View</h3>
+    <div class="room-container" id="room-container">
+      <span class="room-label">Floor Plan View</span>
+
+      <!-- Router -->
+      <div class="router-icon">📶<span class="device-label">Router</span></div>
+
+      <!-- WiFi waves -->
+      <div class="wifi-waves" id="wifi-waves">
+        <div class="wave"></div><div class="wave"></div>
+        <div class="wave"></div><div class="wave"></div>
+      </div>
+
+      <!-- Person -->
+      <div class="person" id="person-viz">
+        <div class="glow" id="person-glow"></div>
+        <svg viewBox="0 0 50 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="25" cy="12" r="10" fill="#667" id="person-head"/>
+          <path d="M25 22 L25 50 M10 35 L40 35 M25 50 L12 75 M25 50 L38 75"
+                stroke="#667" stroke-width="3" stroke-linecap="round" id="person-body"/>
+        </svg>
+      </div>
+
+      <!-- ESP32 -->
+      <div class="esp-icon">🔌<span class="device-label">ESP32</span></div>
+
+      <!-- Disturbance overlay -->
+      <div class="disturbance-overlay" id="disturbance-overlay"></div>
+    </div>
+  </div>
+
+  <!-- Movement Score -->
+  <div class="card">
+    <h3>Movement Score</h3>
+    <div class="big-score">
+      <div class="value score-idle" id="score-value">—</div>
+      <div class="label">0 = still &nbsp;|&nbsp; 10 = intense motion</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="motion-badge motion-off" id="motion-badge">IDLE</div>
+    </div>
+  </div>
+
+  <!-- Live waveform chart -->
+  <div class="card">
+    <h3>Movement Waveform</h3>
+    <div class="chart-container">
+      <canvas id="waveform-canvas"></canvas>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat-box">
+      <div class="val" id="stat-current">—</div>
+      <div class="lbl">Current</div>
+    </div>
+    <div class="stat-box">
+      <div class="val" id="stat-peak">0.0</div>
+      <div class="lbl">Peak (session)</div>
+    </div>
+    <div class="stat-box">
+      <div class="val" id="stat-avg">—</div>
+      <div class="lbl">Avg (60s)</div>
+    </div>
+    <div class="stat-box">
+      <div class="val" id="stat-events">0</div>
+      <div class="lbl">Motion Events</div>
+    </div>
+  </div>
+
+  <!-- Event log -->
+  <div class="card event-log">
+    <h3>Motion Event Log</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Event</th><th>Score</th></tr></thead>
+      <tbody id="event-log-body"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+// ─── State ───
+let evtSource = null;
+let connected = false;
+let scoreHistory = [];
+const MAX_HISTORY = 200;
+let peak = 0;
+let motionEvents = 0;
+let lastMotionState = false;
+let recentScores = [];
+
+// ─── DOM refs ───
+const $ = id => document.getElementById(id);
+
+// ─── Connection ───
+function toggleConnection() {
+  if (connected) { disconnect(); return; }
+  connect();
+}
+
+function connect() {
+  const host = $('esp-host').value.trim();
+  if (!host) return;
+  setStatus('connecting');
+
+  // ESPHome web_server v3 exposes Server-Sent Events at /events
+  const url = `http://${host}/events`;
+  evtSource = new EventSource(url);
+
+  evtSource.addEventListener('state', (e) => {
+    const data = JSON.parse(e.data);
+    handleState(data);
+  });
+
+  evtSource.onopen = () => setStatus('connected');
+  evtSource.onerror = () => {
+    if (connected) setStatus('error');
+    else setStatus('disconnected');
+  };
+}
+
+function disconnect() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  setStatus('disconnected');
+}
+
+function setStatus(s) {
+  const dot = $('conn-status');
+  const txt = $('conn-text');
+  const btn = $('btn-connect');
+  dot.className = 'status ' + (s === 'connecting' ? 'disconnected' : s);
+  txt.textContent = s === 'connected' ? 'Connected' : s === 'error' ? 'Connection lost' : s === 'connecting' ? 'Connecting...' : 'Disconnected';
+  connected = s === 'connected';
+  btn.textContent = connected ? 'Disconnect' : 'Connect';
+  btn.className = connected ? 'disconnect' : '';
+}
+
+// ─── Handle incoming state ───
+function handleState(data) {
+  const id = data.id || '';
+  const value = parseFloat(data.value);
+
+  // Movement score sensor
+  if (id.includes('movement') && !isNaN(value)) {
+    updateScore(value);
+  }
+
+  // Motion binary sensor
+  if (id.includes('motion')) {
+    const isOn = data.state === 'ON' || data.value === true || data.value === 1;
+    updateMotion(isOn);
+  }
+}
+
+// ─── Update movement score ───
+function updateScore(val) {
+  // Clamp
+  val = Math.max(0, Math.min(10, val));
+
+  // Score display
+  const el = $('score-value');
+  el.textContent = val.toFixed(2);
+  el.className = 'value ' + scoreClass(val);
+  $('stat-current').textContent = val.toFixed(1);
+
+  // Peak
+  if (val > peak) { peak = val; $('stat-peak').textContent = peak.toFixed(1); }
+
+  // History for chart
+  scoreHistory.push({ t: Date.now(), v: val });
+  if (scoreHistory.length > MAX_HISTORY) scoreHistory.shift();
+
+  // Rolling average (last 60s)
+  recentScores.push({ t: Date.now(), v: val });
+  const cutoff = Date.now() - 60000;
+  recentScores = recentScores.filter(s => s.t > cutoff);
+  const avg = recentScores.reduce((a, s) => a + s.v, 0) / recentScores.length;
+  $('stat-avg').textContent = avg.toFixed(1);
+
+  // Update visuals
+  updateRoomViz(val);
+  drawChart();
+}
+
+function scoreClass(v) {
+  if (v < 2) return 'score-idle';
+  if (v < 5) return 'score-low';
+  if (v < 7.5) return 'score-mid';
+  return 'score-high';
+}
+
+// ─── Update motion state ───
+function updateMotion(isOn) {
+  const badge = $('motion-badge');
+  if (isOn) {
+    badge.textContent = '● MOTION DETECTED';
+    badge.className = 'motion-badge motion-on';
+    if (!lastMotionState) {
+      motionEvents++;
+      $('stat-events').textContent = motionEvents;
+      addLogEntry('MOTION', $('score-value').textContent);
+    }
+  } else {
+    badge.textContent = 'IDLE';
+    badge.className = 'motion-badge motion-off';
+    if (lastMotionState) {
+      addLogEntry('IDLE', $('score-value').textContent);
+    }
+  }
+  lastMotionState = isOn;
+}
+
+// ─── Room visualization ───
+function updateRoomViz(score) {
+  const norm = score / 10; // 0-1
+
+  // Person glow
+  const glow = $('person-glow');
+  const r = Math.round(239 * norm);
+  const g = Math.round(68 * norm);
+  glow.style.background = `rgba(${r}, ${g}, 50, ${norm * 0.6})`;
+  glow.style.opacity = 0.3 + norm * 0.7;
+
+  // Person color
+  const personColor = norm > 0.3 ? `rgb(${150 + 105*norm}, ${100 - 50*norm}, ${100 - 50*norm})` : '#667';
+  $('person-head').setAttribute('fill', personColor);
+  $('person-body').setAttribute('stroke', personColor);
+
+  // Person sway animation
+  const person = $('person-viz');
+  if (norm > 0.4) {
+    const sway = Math.sin(Date.now() / 200) * norm * 5;
+    person.style.transform = `translate(-50%, -50%) translateX(${sway}px)`;
+  } else {
+    person.style.transform = 'translate(-50%, -50%)';
+  }
+
+  // WiFi wave color based on disturbance
+  const waves = document.querySelectorAll('.wave');
+  const waveColor = norm > 0.3
+    ? `rgba(239, ${Math.round(130 - 80*norm)}, ${Math.round(100 - 80*norm)}, ${0.2 + norm*0.4})`
+    : 'rgba(59, 130, 246, 0.3)';
+  waves.forEach(w => w.style.borderColor = waveColor);
+
+  // Disturbance lines
+  if (norm > 0.3 && Math.random() < norm * 0.4) {
+    spawnDisturbanceLine();
+  }
+}
+
+function spawnDisturbanceLine() {
+  const overlay = $('disturbance-overlay');
+  const line = document.createElement('div');
+  line.className = 'disturbance-line';
+  const y = 20 + Math.random() * 60;
+  line.style.top = y + '%';
+  line.style.left = '15%';
+  line.style.width = '70%';
+  line.style.animationDuration = (0.4 + Math.random() * 0.6) + 's';
+  overlay.appendChild(line);
+  setTimeout(() => line.remove(), 1200);
+}
+
+// ─── Waveform chart (pure canvas) ───
+function drawChart() {
+  const canvas = $('waveform-canvas');
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  const W = rect.width, H = rect.height;
+
+  // Clear
+  ctx.fillStyle = '#080c18';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = '#1a1a3a';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 10; i += 2) {
+    const y = H - (i / 10) * H;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillStyle = '#334';
+    ctx.font = '10px system-ui';
+    ctx.fillText(i.toString(), 4, y - 3);
+  }
+
+  if (scoreHistory.length < 2) return;
+
+  // Threshold line
+  const thrY = H - (5 / 10) * H;
+  ctx.strokeStyle = 'rgba(239, 68, 68, 0.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(0, thrY); ctx.lineTo(W, thrY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#ef4444';
+  ctx.font = '10px system-ui';
+  ctx.fillText('threshold', W - 60, thrY - 4);
+
+  // Draw waveform
+  const step = W / (MAX_HISTORY - 1);
+  ctx.beginPath();
+  scoreHistory.forEach((p, i) => {
+    const x = i * step;
+    const y = H - (p.v / 10) * H;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = '#3b82f6';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Gradient fill under the line
+  const gradient = ctx.createLinearGradient(0, 0, 0, H);
+  gradient.addColorStop(0, 'rgba(59, 130, 246, 0.3)');
+  gradient.addColorStop(1, 'rgba(59, 130, 246, 0)');
+  ctx.lineTo((scoreHistory.length - 1) * step, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+}
+
+// ─── Event log ───
+function addLogEntry(event, score) {
+  const tbody = $('event-log-body');
+  const row = document.createElement('tr');
+  row.className = event === 'MOTION' ? 'motion-row' : 'idle-row';
+  const now = new Date();
+  const time = now.toLocaleTimeString();
+  row.innerHTML = `<td>${time}</td><td>${event === 'MOTION' ? '🔴 Motion Detected' : '🟢 Idle'}</td><td>${score}</td>`;
+  tbody.insertBefore(row, tbody.firstChild);
+  // Keep max 50 entries
+  while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+}
+
+// ─── Auto-connect on load ───
+window.addEventListener('load', () => {
+  // Try to auto-connect after 500ms
+  setTimeout(() => connect(), 500);
+});
+
+// ─── Resize handler ───
+window.addEventListener('resize', drawChart);
+</script>
+
+</body>
+</html>
