@@ -139,73 +139,92 @@ class ESP32Sensor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Person Detector (MediaPipe or fallback)
+# Person Detector — YOLO (best) > HOG > motion fallback
 # ═══════════════════════════════════════════════════════════════════════════════
 class PersonDetector:
     def __init__(self):
+        self.mode = None
+        self.yolo = None
+
+        # 1) Try YOLO (ultralytics) — most reliable, one clean box
+        try:
+            from ultralytics import YOLO
+            self.yolo = YOLO('yolov8n.pt')  # auto-downloads ~6MB on first run
+            self.mode = 'yolo'
+            print("[DET]   Using YOLOv8 person detection (accurate)")
+            return
+        except Exception as e:
+            print(f"[DET]   YOLO unavailable ({e.__class__.__name__}); trying HOG...")
+
+        # 2) Try MediaPipe legacy pose (skeleton)
         if USE_MEDIAPIPE:
             self.mp_pose = mp.solutions.pose
             self.pose = self.mp_pose.Pose(
-                static_image_mode=False,
-                model_complexity=1,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
+                static_image_mode=False, model_complexity=1,
+                min_detection_confidence=0.5, min_tracking_confidence=0.5)
             self.mp_draw = mp.solutions.drawing_utils
-        else:
-            # Fallback: simple frame differencing for motion regions
-            self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=300, varThreshold=25, detectShadows=False
-            )
+            self.mode = 'mediapipe'
+            print("[DET]   Using MediaPipe Pose")
+            return
+
+        # 3) HOG people detector (ships with OpenCV, no download)
+        self.hog = cv2.HOGDescriptor()
+        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        self.mode = 'hog'
+        print("[DET]   Using OpenCV HOG people detector")
 
     def detect(self, frame):
-        """
-        Returns list of detections:
-          [{'bbox': (x1, y1, x2, y2), 'center': (cx, cy), 'confidence': float}]
-        """
+        """Returns list: [{'bbox':(x1,y1,x2,y2),'center':(cx,cy),'confidence':float}]"""
         h, w = frame.shape[:2]
         detections = []
 
-        if USE_MEDIAPIPE:
+        if self.mode == 'yolo':
+            results = self.yolo(frame, classes=[0], verbose=False)  # class 0 = person
+            best = None
+            for r in results:
+                for box in r.boxes:
+                    conf = float(box.conf[0])
+                    if conf < 0.4:
+                        continue
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    if best is None or conf > best['confidence']:
+                        best = {'bbox': (x1, y1, x2, y2),
+                                'center': ((x1 + x2) // 2, (y1 + y2) // 2),
+                                'confidence': conf}
+            if best:
+                detections.append(best)  # keep only the single best person
+
+        elif self.mode == 'mediapipe':
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.pose.process(rgb)
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
-                # Bounding box from landmarks
                 xs = [l.x * w for l in lm if l.visibility > 0.5]
                 ys = [l.y * h for l in lm if l.visibility > 0.5]
                 if xs and ys:
-                    x1, x2 = int(min(xs)) - 20, int(max(xs)) + 20
-                    y1, y2 = int(min(ys)) - 20, int(max(ys)) + 20
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    detections.append({
-                        'bbox': (x1, y1, x2, y2),
-                        'center': (cx, cy),
-                        'confidence': 0.9,
-                    })
-                # Draw skeleton on frame
+                    x1, x2 = max(0, int(min(xs)) - 20), min(w, int(max(xs)) + 20)
+                    y1, y2 = max(0, int(min(ys)) - 20), min(h, int(max(ys)) + 20)
+                    detections.append({'bbox': (x1, y1, x2, y2),
+                                       'center': ((x1 + x2) // 2, (y1 + y2) // 2),
+                                       'confidence': 0.9})
                 self.mp_draw.draw_landmarks(
                     frame, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=self.mp_draw.DrawingSpec(color=(0, 255, 128), thickness=2, circle_radius=2),
-                    connection_drawing_spec=self.mp_draw.DrawingSpec(color=(0, 200, 100), thickness=2),
-                )
-        else:
-            # Fallback: motion regions
-            mask = self.bg_subtractor.apply(frame)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5)))
-            mask = cv2.dilate(mask, np.ones((15, 15)), iterations=2)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if area > 3000:  # minimum person-sized blob
-                    x, y, bw, bh = cv2.boundingRect(cnt)
-                    detections.append({
-                        'bbox': (x, y, x + bw, y + bh),
-                        'center': (x + bw // 2, y + bh // 2),
-                        'confidence': min(1.0, area / 20000),
-                    })
+                    self.mp_draw.DrawingSpec(color=(0, 255, 128), thickness=2, circle_radius=2),
+                    self.mp_draw.DrawingSpec(color=(0, 200, 100), thickness=2))
+
+        else:  # HOG — keep only the largest/most confident box
+            rects, weights = self.hog.detectMultiScale(frame, winStride=(8, 8), padding=(8, 8), scale=1.05)
+            best = None
+            for (x, y, bw, bh), wt in zip(rects, weights):
+                conf = float(wt)
+                if conf < 0.3:
+                    continue
+                if best is None or conf > best['confidence']:
+                    best = {'bbox': (x, y, x + bw, y + bh),
+                            'center': (x + bw // 2, y + bh // 2),
+                            'confidence': conf}
+            if best:
+                detections.append(best)
 
         return detections
 

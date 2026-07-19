@@ -2,4 +2,9 @@
 opencv-python>=4.8.0
 numpy>=1.24.0
 requests>=2.31.0
-mediapipe>=0.10.0
+
+# Best person detection (recommended). Downloads a ~6MB model on first run.
+ultralytics>=8.0.0
+
+# Optional legacy pose detector (only if ultralytics not used)
+# mediapipe>=0.10.0
