@@ -23,7 +23,7 @@
 
 substitutions:
   git_ref: main                 # espectre version: branch, tag, or commit
-  detection_algorithm: ml       # ml = no calibration, starts in ~3 sec
+  detection_algorithm: mvs      # mvs = adaptive, accurate at rest (needs ~5min calibration)
 
 esphome:
   name: espectre
@@ -61,8 +61,10 @@ espectre:
   detection_algorithm: ${detection_algorithm}
   traffic_generator_rate: 200   # packets/sec used to probe the channel (0-1000)
   traffic_generator_mode: dns   # dns works better on original ESP32
-  segmentation_threshold: 5.0   # ML default threshold
-  evaluation_interval: 10       # faster response
+  segmentation_threshold: auto  # MVS auto-tunes to your room (still = near 0)
+  evaluation_interval: 25       # smoother, fewer false triggers
+  lowpass_enabled: true         # smooth out noise -> fewer false positives
+  hampel_enabled: true          # remove sudden spikes
   # These names are what you will see on the web dashboard:
   movement_sensor:
     name: "Movement Score"      # 0-10 intensity of detected motion

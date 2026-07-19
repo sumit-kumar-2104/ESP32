@@ -3,139 +3,106 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ESP32 WiFi Sensing — Room Visualization</title>
+<title>ESP32 WiFi Sensing — Live Data</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  background: #0a0e1a;
-  color: #e0e0e0;
-  min-height: 100vh;
-}
-.header {
-  text-align: center; padding: 15px;
-  background: linear-gradient(135deg, #0d1330, #1a1040);
-  border-bottom: 1px solid #2a2a4a;
-}
-.header h1 { font-size: 1.4em; color: #7eb8ff; }
-.header p { font-size: 0.8em; color: #888; margin-top: 2px; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e1a; color: #e0e0e0; min-height: 100vh; }
+.header { text-align: center; padding: 15px; background: linear-gradient(135deg,#0d1330,#1a1040); border-bottom: 1px solid #2a2a4a; }
+.header h1 { font-size: 1.35em; color: #7eb8ff; }
+.header p { font-size: 0.78em; color: #888; margin-top: 3px; }
+.note { font-size: 0.72em; color: #6b7280; max-width: 760px; margin: 6px auto 0; line-height: 1.4; }
 
-.conn-bar {
-  display: flex; align-items: center; justify-content: center;
-  gap: 12px; padding: 10px; background: #0d1020;
-  border-bottom: 1px solid #1a1a3a; flex-wrap: wrap;
-}
-.conn-bar input {
-  background: #151830; border: 1px solid #2a2a5a; color: #ccc;
-  padding: 6px 12px; border-radius: 4px; width: 180px; font-size: 0.85em;
-}
-.conn-bar button {
-  background: #2563eb; color: #fff; border: none; padding: 6px 16px;
-  border-radius: 4px; cursor: pointer; font-size: 0.85em;
-}
+.conn-bar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px; background: #0d1020; border-bottom: 1px solid #1a1a3a; flex-wrap: wrap; }
+.conn-bar input { background: #151830; border: 1px solid #2a2a5a; color: #ccc; padding: 6px 12px; border-radius: 4px; width: 170px; font-size: 0.85em; }
+.conn-bar button { background: #2563eb; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85em; }
 .conn-bar button:hover { background: #3b82f6; }
-.conn-bar .dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  display: inline-block; margin-right: 4px;
-}
-.dot.on { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-.dot.off { background: #555; }
-.dot.err { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.dot.on { background: #22c55e; box-shadow: 0 0 6px #22c55e; } .dot.off { background: #555; } .dot.err { background: #ef4444; }
 .status-text { font-size: 0.8em; color: #999; }
 
-.main { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; max-width: 1600px; margin: 0 auto; }
-.room-panel { flex: 2; min-width: 550px; }
-.side-panel { flex: 1; min-width: 280px; display: flex; flex-direction: column; gap: 12px; }
+.main { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+.col { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 14px; }
+.card { background: #111630; border: 1px solid #1e2248; border-radius: 12px; padding: 18px; }
+.card h3 { font-size: 0.8em; color: #6b8cce; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
 
-.room-card {
-  background: #111630; border: 1px solid #1e2248; border-radius: 12px;
-  padding: 16px;
-}
-.room-card h3 { font-size: 0.85em; color: #6b8cce; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-#room-canvas { width: 100%; height: 500px; display: block; border-radius: 8px; }
-
-.card {
-  background: #111630; border: 1px solid #1e2248; border-radius: 12px; padding: 16px;
-}
-.card h3 { font-size: 0.8em; color: #6b8cce; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-
-.score-display { text-align: center; padding: 10px 0; }
-.score-display .value {
-  font-size: 3.5em; font-weight: 700; font-variant-numeric: tabular-nums;
-  transition: color 0.3s;
-}
-.score-display .sub { font-size: 0.75em; color: #556; margin-top: 4px; }
-.s-idle { color: #22c55e; } .s-low { color: #eab308; }
-.s-mid { color: #f97316; } .s-high { color: #ef4444; }
-
-.motion-badge {
-  display: inline-block; padding: 8px 20px; border-radius: 20px;
-  font-weight: 600; margin-top: 8px; transition: all 0.3s;
-}
+/* Gauge */
+.gauge-wrap { text-align: center; }
+#gauge-canvas { width: 260px; height: 160px; max-width: 100%; }
+.gauge-val { font-size: 2.6em; font-weight: 700; margin-top: -30px; font-variant-numeric: tabular-nums; }
+.motion-badge { display: inline-block; padding: 8px 22px; border-radius: 20px; font-weight: 600; margin-top: 14px; transition: all 0.3s; }
 .m-on { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); animation: pulse 1.5s infinite; }
 .m-off { background: rgba(34,197,94,0.1); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
-@keyframes pulse { 0%,100%{ box-shadow:0 0 8px rgba(239,68,68,0.2); } 50%{ box-shadow:0 0 20px rgba(239,68,68,0.5); } }
+@keyframes pulse { 0%,100%{box-shadow:0 0 8px rgba(239,68,68,0.2);} 50%{box-shadow:0 0 20px rgba(239,68,68,0.5);} }
+
+/* Link diagram */
+#link-canvas { width: 100%; height: 130px; display: block; background: #080c18; border-radius: 8px; }
+
+/* Waveform */
+#chart-canvas { width: 100%; height: 180px; display: block; background: #080c18; border-radius: 8px; }
 
 .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .stat { background: #0d1025; border: 1px solid #1e2248; border-radius: 8px; padding: 10px; text-align: center; }
-.stat .v { font-size: 1.4em; font-weight: 700; color: #7eb8ff; }
-.stat .l { font-size: 0.65em; color: #556; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+.stat .v { font-size: 1.4em; font-weight: 700; color: #7eb8ff; } .stat .l { font-size: 0.64em; color: #556; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
 
-#chart-canvas { width: 100%; height: 150px; display: block; background: #080c18; border-radius: 6px; }
-
-.log-list { max-height: 150px; overflow-y: auto; font-size: 0.75em; }
+.log-list { max-height: 160px; overflow-y: auto; font-size: 0.75em; }
 .log-list div { padding: 3px 6px; border-bottom: 1px solid #0d1025; }
 .log-list .mot { color: #ef4444; } .log-list .idl { color: #22c55e; }
 
-@media (max-width: 900px) {
-  .room-panel, .side-panel { min-width: 100%; flex: unset; }
-  #room-canvas { height: 350px; }
-}
+.s-idle { color: #22c55e; } .s-low { color: #eab308; } .s-mid { color: #f97316; } .s-high { color: #ef4444; }
+@media (max-width: 760px){ .col { min-width: 100%; } }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>📡 WiFi CSI Room Sensing — Live View</h1>
-  <p>Real-time human presence detection via WiFi signal disturbance</p>
+  <h1>📡 ESP32 WiFi CSI — Live Sensing Data</h1>
+  <p>What the sensor actually measures: WiFi signal disturbance between router and ESP32</p>
+  <p class="note">This is NOT a camera. One ESP32 measures a single number — how much movement is disturbing
+  the WiFi link. It cannot image a room or locate a person. Everything shown below is the real measured signal.</p>
 </div>
 
 <div class="conn-bar">
   <label style="font-size:0.8em;color:#999;">ESP32 IP:</label>
-  <input type="text" id="host-input" value="192.168.0.10" placeholder="e.g. 192.168.0.10">
+  <input type="text" id="host-input" value="192.168.0.10" placeholder="192.168.0.10">
   <button id="conn-btn" onclick="toggleConn()">Connect</button>
   <span><span class="dot off" id="dot"></span><span class="status-text" id="status-text">Disconnected</span></span>
 </div>
 
 <div class="main">
-  <div class="room-panel">
-    <div class="room-card">
-      <h3>Room Layout — WiFi Sensing Zone</h3>
-      <canvas id="room-canvas"></canvas>
+  <!-- Left column -->
+  <div class="col">
+    <div class="card gauge-wrap">
+      <h3>Movement Score (live)</h3>
+      <canvas id="gauge-canvas" width="260" height="160"></canvas>
+      <div class="gauge-val s-idle" id="gauge-val">—</div>
+      <div><span class="motion-badge m-off" id="motion-badge">IDLE — No Motion</span></div>
+    </div>
+
+    <div class="card">
+      <h3>WiFi Link Status</h3>
+      <canvas id="link-canvas"></canvas>
+      <p style="font-size:0.72em;color:#556;margin-top:8px;">The beam brightens/reddens in real time as movement
+      disturbs the signal between your router and the ESP32. This reflects actual measured data.</p>
     </div>
   </div>
-  <div class="side-panel">
+
+  <!-- Right column -->
+  <div class="col">
     <div class="card">
-      <h3>Movement Score</h3>
-      <div class="score-display">
-        <div class="value s-idle" id="score-val">—</div>
-        <div class="sub">0 = empty room &nbsp;|&nbsp; 10 = heavy movement</div>
-        <div class="motion-badge m-off" id="motion-badge">IDLE — No Motion</div>
-      </div>
+      <h3>Movement Over Time</h3>
+      <canvas id="chart-canvas"></canvas>
     </div>
+
     <div class="card">
       <h3>Statistics</h3>
       <div class="stats-grid">
         <div class="stat"><div class="v" id="s-curr">—</div><div class="l">Current</div></div>
         <div class="stat"><div class="v" id="s-peak">0.0</div><div class="l">Peak</div></div>
-        <div class="stat"><div class="v" id="s-avg">—</div><div class="l">Avg (60s)</div></div>
-        <div class="stat"><div class="v" id="s-evts">0</div><div class="l">Events</div></div>
+        <div class="stat"><div class="v" id="s-avg">—</div><div class="l">Avg 60s</div></div>
+        <div class="stat"><div class="v" id="s-evts">0</div><div class="l">Motion Events</div></div>
       </div>
     </div>
-    <div class="card">
-      <h3>Waveform (last 5 min)</h3>
-      <canvas id="chart-canvas"></canvas>
-    </div>
+
     <div class="card">
       <h3>Event Log</h3>
       <div class="log-list" id="log-list"></div>
@@ -144,261 +111,167 @@ body {
 </div>
 
 <script>
-// === STATE ===
-let es = null, connected = false, reconnTimer = null;
-let score = 0, peak = 0, events = 0, lastMotion = false;
-let history = [], recent = [];
-const HIST = 300;
+// ===== STATE =====
+var host='', polling=false, pollTimer=null, failCount=0;
+var score=0, peak=0, events=0, lastMotion=false;
+var history=[], recent=[];
+var HIST=300;
 
-// === CONNECTION (auto-reconnect) ===
-function toggleConn() { connected ? disconnect() : connect(); }
-function connect() {
-  const host = document.getElementById('host-input').value.trim();
-  if (!host) return;
-  if (es) { es.close(); es = null; }
-  setStatus('connecting');
-  es = new EventSource('http://' + host + '/events');
-  es.addEventListener('state', function(e) { handleState(JSON.parse(e.data)); });
-  es.onopen = function() { setStatus('on'); clearTimeout(reconnTimer); };
-  es.onerror = function() { setStatus('err'); es.close(); es = null; reconnTimer = setTimeout(connect, 2000); };
+// ===== CONNECTION VIA POLLING (stable, no dropping) =====
+function toggleConn(){ polling ? stopPoll() : startPoll(); }
+function startPoll(){
+  host = document.getElementById('host-input').value.trim();
+  if(!host) return;
+  polling = true; failCount = 0;
+  setStatus('on');
+  document.getElementById('conn-btn').textContent='Disconnect';
+  poll();
 }
-function disconnect() { clearTimeout(reconnTimer); if(es){es.close();es=null;} setStatus('off'); }
-function setStatus(s) {
-  var d=document.getElementById('dot'), t=document.getElementById('status-text'), b=document.getElementById('conn-btn');
+function stopPoll(){
+  polling = false; clearTimeout(pollTimer);
+  setStatus('off');
+  document.getElementById('conn-btn').textContent='Connect';
+}
+function poll(){
+  if(!polling) return;
+  // Fetch movement score + motion state in parallel
+  Promise.all([
+    fetch('http://'+host+'/sensor/movement_score').then(r=>r.json()).catch(()=>null),
+    fetch('http://'+host+'/binary_sensor/motion_detected').then(r=>r.json()).catch(()=>null)
+  ]).then(function(res){
+    var mv=res[0], mo=res[1];
+    if(mv===null && mo===null){ onFail(); return; }
+    failCount=0; setStatus('on');
+    if(mv && mv.value!==undefined && !isNaN(parseFloat(mv.value))) updateScore(parseFloat(mv.value));
+    if(mo){ var on = mo.state==='ON'||mo.value===true||mo.value===1; updateMotion(on); }
+  }).catch(onFail).finally(function(){
+    if(polling) pollTimer=setTimeout(poll, 400); // poll ~2.5x/sec
+  });
+}
+function onFail(){
+  failCount++;
+  if(failCount>3) setStatus('err');  // show trouble only after a few misses; keep polling
+}
+function setStatus(s){
+  var d=document.getElementById('dot'), t=document.getElementById('status-text');
   d.className='dot '+(s==='on'?'on':s==='err'?'err':'off');
-  t.textContent=s==='on'?'Connected':s==='err'?'Reconnecting...':s==='connecting'?'Connecting...':'Disconnected';
-  connected=s==='on'; b.textContent=connected?'Disconnect':'Connect';
+  t.textContent = s==='on'?'Connected':s==='err'?'No data (retrying)…':'Disconnected';
 }
 
-// === DATA ===
-function handleState(d) {
-  var id = d.id||'';
-  if (id.indexOf('movement')>=0 && !isNaN(parseFloat(d.value))) updateScore(parseFloat(d.value));
-  if (id.indexOf('motion')>=0) updateMotion(d.state==='ON'||d.value===true||d.value===1);
-}
-function updateScore(v) {
-  score = Math.max(0, Math.min(10, v));
-  var el=document.getElementById('score-val');
+// ===== DATA UPDATES =====
+function updateScore(v){
+  score=Math.max(0,Math.min(10,v));
+  var el=document.getElementById('gauge-val');
   el.textContent=score.toFixed(2);
-  el.className='value '+(score<2?'s-idle':score<5?'s-low':score<7.5?'s-mid':'s-high');
+  el.className='gauge-val '+cls(score);
   document.getElementById('s-curr').textContent=score.toFixed(1);
   if(score>peak){peak=score;document.getElementById('s-peak').textContent=peak.toFixed(1);}
   history.push(score); if(history.length>HIST) history.shift();
   var now=Date.now(); recent.push({t:now,v:score});
   recent=recent.filter(function(r){return r.t>now-60000;});
-  var avg=recent.reduce(function(a,r){return a+r.v;},0)/recent.length;
-  document.getElementById('s-avg').textContent=avg.toFixed(1);
+  document.getElementById('s-avg').textContent=(recent.reduce(function(a,r){return a+r.v;},0)/recent.length).toFixed(1);
 }
-function updateMotion(on) {
-  var badge=document.getElementById('motion-badge');
-  if(on){badge.textContent='● MOTION DETECTED';badge.className='motion-badge m-on';
-    if(!lastMotion){events++;document.getElementById('s-evts').textContent=events;addLog(true);}
-  } else {badge.textContent='IDLE — No Motion';badge.className='motion-badge m-off';
-    if(lastMotion) addLog(false);}
+function cls(v){ return v<2?'s-idle':v<5?'s-low':v<7.5?'s-mid':'s-high'; }
+function updateMotion(on){
+  var b=document.getElementById('motion-badge');
+  if(on){ b.textContent='● MOTION DETECTED'; b.className='motion-badge m-on';
+    if(!lastMotion){events++;document.getElementById('s-evts').textContent=events;addLog(true);} }
+  else { b.textContent='IDLE — No Motion'; b.className='motion-badge m-off';
+    if(lastMotion) addLog(false); }
   lastMotion=on;
 }
-function addLog(m) {
-  var list=document.getElementById('log-list'), div=document.createElement('div');
-  div.className=m?'mot':'idl';
-  div.textContent=new Date().toLocaleTimeString()+' — '+(m?'🔴 Motion Detected':'🟢 Room Clear');
-  list.insertBefore(div,list.firstChild);
+function addLog(m){
+  var list=document.getElementById('log-list'), d=document.createElement('div');
+  d.className=m?'mot':'idl';
+  d.textContent=new Date().toLocaleTimeString()+' — '+(m?'🔴 Motion started':'🟢 Room clear');
+  list.insertBefore(d,list.firstChild);
   while(list.children.length>40) list.removeChild(list.lastChild);
 }
 
-// === ROOM CANVAS ===
-var canvas=document.getElementById('room-canvas'), ctx=canvas.getContext('2d');
-var W,H;
-function resize(){
-  var rect=canvas.getBoundingClientRect();
-  W=rect.width; H=rect.height;
-  canvas.width=W*devicePixelRatio; canvas.height=H*devicePixelRatio;
-  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+// ===== GAUGE =====
+function drawGauge(){
+  var c=document.getElementById('gauge-canvas'), x=c.getContext('2d');
+  var w=c.width, h=c.height, cx=w/2, cy=h-10, R=100;
+  x.clearRect(0,0,w,h);
+  // Track
+  x.lineWidth=16; x.lineCap='round';
+  x.beginPath(); x.arc(cx,cy,R,Math.PI,2*Math.PI); x.strokeStyle='#1a1e38'; x.stroke();
+  // Value arc
+  var frac=score/10;
+  var col = score<2?'#22c55e':score<5?'#eab308':score<7.5?'#f97316':'#ef4444';
+  x.beginPath(); x.arc(cx,cy,R,Math.PI,Math.PI+Math.PI*frac); x.strokeStyle=col; x.stroke();
+  // Ticks
+  x.fillStyle='#445'; x.font='9px system-ui'; x.textAlign='center';
+  x.fillText('0',cx-R,cy+4); x.fillText('10',cx+R,cy+4); x.fillText('5',cx,cy-R-4);
+  requestAnimationFrame(drawGauge);
 }
-window.addEventListener('resize',resize); resize();
 
-var wavePhase=0, disturbances=[], personPhase=0;
-
-function drawRoom(){
-  ctx.clearRect(0,0,W,H);
-  var RX=30,RY=30,RW=W-60,RH=H-60;
+// ===== LINK DIAGRAM =====
+var linkPhase=0;
+function drawLink(){
+  var c=document.getElementById('link-canvas');
+  var w=c.parentElement.clientWidth-36, h=130;
+  c.width=w*devicePixelRatio; c.height=h*devicePixelRatio;
+  c.style.width=w+'px'; c.style.height=h+'px';
+  var x=c.getContext('2d'); x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  x.clearRect(0,0,w,h);
   var norm=score/10;
+  var rX=40, eX=w-40, y=h/2;
 
-  // Floor
-  ctx.fillStyle='#0c1020'; ctx.fillRect(RX,RY,RW,RH);
-  // Grid
-  ctx.strokeStyle='rgba(30,40,80,0.3)'; ctx.lineWidth=0.5;
-  for(var gx=RX;gx<RX+RW;gx+=35){ctx.beginPath();ctx.moveTo(gx,RY);ctx.lineTo(gx,RY+RH);ctx.stroke();}
-  for(var gy=RY;gy<RY+RH;gy+=35){ctx.beginPath();ctx.moveTo(RX,gy);ctx.lineTo(RX+RW,gy);ctx.stroke();}
-
-  // Positions
-  var routerX=RX+RW*0.08, routerY=RY+RH*0.5;
-  var espX=RX+RW*0.92, espY=RY+RH*0.5;
-  var midX=(routerX+espX)/2, midY=(routerY+espY)/2;
-
-  // === HEATMAP (motion intensity) ===
-  if(norm>0.05){
-    var hg=ctx.createRadialGradient(midX,midY,10,midX,midY,RW*0.42);
-    var r=Math.round(220*norm),g2=Math.round(50*(1-norm));
-    hg.addColorStop(0,'rgba('+r+','+g2+',20,'+norm*0.4+')');
-    hg.addColorStop(0.5,'rgba('+r+','+g2+',20,'+norm*0.15+')');
-    hg.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=hg;
-    ctx.beginPath(); ctx.ellipse(midX,midY,RW*0.4,RH*0.38,0,0,Math.PI*2); ctx.fill();
-  }
-
-  // === WiFi RAYS (animated, wavy when disturbed) ===
-  wavePhase+=0.04;
-  for(var i=0;i<9;i++){
-    var angle=((i-4)/9)*0.7;
-    ctx.beginPath(); ctx.moveTo(routerX,routerY);
-    for(var s=1;s<=25;s++){
-      var t=s/25;
-      var x=routerX+(espX-routerX)*t;
-      var baseY=routerY+(espY-routerY+angle*RH*0.5)*t;
-      var wave=Math.sin(t*14+wavePhase+i*0.8)*norm*10;
-      ctx.lineTo(x,baseY+wave);
+  // Beam (multiple wavy lines)
+  linkPhase+=0.05;
+  for(var i=0;i<5;i++){
+    x.beginPath();
+    for(var s=0;s<=30;s++){
+      var t=s/30, px=rX+(eX-rX)*t;
+      var wob=Math.sin(t*10+linkPhase+i)*norm*9*(i-2);
+      var py=y+wob*0.4;
+      s===0?x.moveTo(px,py):x.lineTo(px,py);
     }
-    var alpha=0.05+norm*0.12;
-    ctx.strokeStyle=norm>0.3?'rgba('+(140+110*norm)+','+(120-80*norm)+',50,'+alpha+')':'rgba(59,130,246,'+alpha+')';
-    ctx.lineWidth=1; ctx.stroke();
+    var a=0.08+norm*0.14;
+    x.strokeStyle=norm>0.3?'rgba('+(150+105*norm)+','+(110-70*norm)+',50,'+a+')':'rgba(59,130,246,'+a+')';
+    x.lineWidth=1.5; x.stroke();
   }
-
-  // Router rings
-  for(var ring=0;ring<4;ring++){
-    var rr=((wavePhase*35+ring*55)%200);
-    ctx.beginPath(); ctx.arc(routerX,routerY,rr,-0.6,0.6);
-    ctx.strokeStyle='rgba(59,130,246,'+(0.2-rr/200*0.2)+')';
-    ctx.lineWidth=1.5; ctx.stroke();
-  }
-
-  // === DISTURBANCE RIPPLES ===
-  if(norm>0.25 && Math.random()<norm*0.2)
-    disturbances.push({x:midX+(Math.random()-0.5)*RW*0.5, y:midY+(Math.random()-0.5)*RH*0.4, r:0, max:30+norm*40});
-  disturbances=disturbances.filter(function(d){
-    d.r+=2; if(d.r>d.max) return false;
-    ctx.beginPath(); ctx.arc(d.x,d.y,d.r,0,Math.PI*2);
-    ctx.strokeStyle='rgba(239,68,68,'+(1-d.r/d.max)*0.5+')';
-    ctx.lineWidth=1.5; ctx.stroke(); return true;
-  });
-
-  // === WALLS ===
-  ctx.strokeStyle='#4a5080'; ctx.lineWidth=4; ctx.strokeRect(RX,RY,RW,RH);
-
-  // Door (bottom)
-  var doorX=RX+RW*0.42;
-  ctx.fillStyle='#0c1020'; ctx.fillRect(doorX,RY+RH-2,55,6);
-  ctx.strokeStyle='#8b5cf6'; ctx.lineWidth=2;
-  ctx.beginPath(); ctx.arc(doorX,RY+RH,50,-Math.PI,-Math.PI/2); ctx.stroke();
-  ctx.fillStyle='#8b5cf680'; ctx.font='10px system-ui'; ctx.fillText('Door',doorX+18,RY+RH+14);
-
-  // Window (left wall)
-  ctx.fillStyle='#1a3050'; ctx.fillRect(RX-3,RY+RH*0.15,6,55);
-  ctx.strokeStyle='#38bdf8'; ctx.lineWidth=1.5; ctx.strokeRect(RX-3,RY+RH*0.15,6,55);
-
-  // Window (top wall)
-  ctx.fillStyle='#1a3050'; ctx.fillRect(RX+RW*0.6,RY-3,70,6);
-  ctx.strokeStyle='#38bdf8'; ctx.lineWidth=1.5; ctx.strokeRect(RX+RW*0.6,RY-3,70,6);
-
-  // === FURNITURE ===
-  var furniture=[
-    {x:0.48,y:0.78,w:130,h:35,l:'Sofa',c:'#1e2540'},
-    {x:0.48,y:0.52,w:65,h:45,l:'Table',c:'#1a2238'},
-    {x:0.82,y:0.18,w:75,h:35,l:'Desk',c:'#1a2238'},
-    {x:0.18,y:0.2,w:85,h:55,l:'Bed',c:'#1e2040'},
-    {x:0.18,y:0.78,w:50,h:50,l:'Chair',c:'#1a2238'},
-    {x:0.82,y:0.78,w:45,h:45,l:'Shelf',c:'#1a2238'},
-  ];
-  furniture.forEach(function(f){
-    var fx=RX+RW*f.x-f.w/2, fy=RY+RH*f.y-f.h/2;
-    ctx.fillStyle=f.c; ctx.strokeStyle='#2a3060'; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.roundRect(fx,fy,f.w,f.h,4); ctx.fill(); ctx.stroke();
-    ctx.fillStyle='#556'; ctx.font='10px system-ui'; ctx.textAlign='center';
-    ctx.fillText(f.l,fx+f.w/2,fy+f.h/2+4); ctx.textAlign='left';
-  });
-
-  // === ROUTER ===
-  ctx.fillStyle='#2563eb'; ctx.beginPath(); ctx.arc(routerX,routerY,16,0,Math.PI*2); ctx.fill();
-  ctx.fillStyle='#fff'; ctx.font='14px system-ui'; ctx.textAlign='center';
-  ctx.fillText('📶',routerX,routerY+5);
-  ctx.fillStyle='#3b82f6'; ctx.font='bold 10px system-ui';
-  ctx.fillText('Router',routerX,routerY+30); ctx.textAlign='left';
-
-  // === ESP32 ===
-  ctx.fillStyle='#16a34a'; ctx.beginPath(); ctx.arc(espX,espY,16,0,Math.PI*2); ctx.fill();
-  ctx.fillStyle='#fff'; ctx.font='bold 10px system-ui'; ctx.textAlign='center';
-  ctx.fillText('ESP32',espX,espY+4);
-  ctx.fillStyle='#22c55e'; ctx.font='bold 10px system-ui';
-  ctx.fillText('Sensor',espX,espY+30); ctx.textAlign='left';
-
-  // === PERSON (animated when motion) ===
-  if(norm>0.12){
-    personPhase+=0.04*norm;
-    var px=midX+Math.sin(personPhase)*50*norm;
-    var py=midY+Math.cos(personPhase*0.6)*30*norm;
-    // Glow
-    var pg=ctx.createRadialGradient(px,py,3,px,py,40);
-    pg.addColorStop(0,'rgba(239,100,50,'+norm*0.5+')'); pg.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(px,py,40,0,Math.PI*2); ctx.fill();
-    // Figure
-    var pc='rgba('+(180+75*norm)+','+(140-80*norm)+','+(100-60*norm)+','+(0.5+norm*0.5)+')';
-    ctx.fillStyle=pc; ctx.strokeStyle=pc; ctx.lineWidth=2.5;
-    ctx.beginPath(); ctx.arc(px,py-20,8,0,Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(px,py-12); ctx.lineTo(px,py+8); ctx.stroke();
-    var as=Math.sin(personPhase*3)*10*norm;
-    ctx.beginPath(); ctx.moveTo(px-14,py-5+as); ctx.lineTo(px+14,py-5-as); ctx.stroke();
-    var ls=Math.sin(personPhase*3+1)*8*norm;
-    ctx.beginPath(); ctx.moveTo(px,py+8); ctx.lineTo(px-10,py+26+ls); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(px,py+8); ctx.lineTo(px+10,py+26-ls); ctx.stroke();
-  }
-
-  // === SCORE BAR ===
-  var bx=RX+10, by=RY+RH-22, bw=RW-20, bh=14;
-  ctx.fillStyle='rgba(10,14,26,0.8)'; ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,7); ctx.fill();
-  if(norm>0){
-    var bg=ctx.createLinearGradient(bx,0,bx+bw,0);
-    bg.addColorStop(0,'#22c55e'); bg.addColorStop(0.4,'#eab308'); bg.addColorStop(0.7,'#f97316'); bg.addColorStop(1,'#ef4444');
-    ctx.fillStyle=bg; ctx.beginPath(); ctx.roundRect(bx,by,bw*Math.min(1,norm),bh,7); ctx.fill();
-  }
-  ctx.fillStyle='#fff'; ctx.font='bold 9px system-ui'; ctx.textAlign='center';
-  ctx.fillText('Movement Intensity: '+score.toFixed(1)+' / 10',RX+RW/2,by+11);
-  ctx.textAlign='left';
-
-  // Legend
-  ctx.fillStyle='#445'; ctx.font='10px system-ui';
-  ctx.fillText('🔴 Red = motion intensity  |  〰️ Wavy rays = signal disturbed  |  🧍 Person position (estimated)',RX+5,RY+RH+20);
-
-  requestAnimationFrame(drawRoom);
+  // Router
+  x.fillStyle='#2563eb'; x.beginPath(); x.arc(rX,y,18,0,7); x.fill();
+  x.fillStyle='#fff'; x.font='16px system-ui'; x.textAlign='center'; x.fillText('📶',rX,y+6);
+  x.fillStyle='#3b82f6'; x.font='bold 11px system-ui'; x.fillText('Router',rX,y+34);
+  // ESP
+  x.fillStyle='#16a34a'; x.beginPath(); x.arc(eX,y,18,0,7); x.fill();
+  x.fillStyle='#fff'; x.font='bold 10px system-ui'; x.fillText('ESP32',eX,y+4);
+  x.fillStyle='#22c55e'; x.font='bold 11px system-ui'; x.fillText('Sensor',eX,y+34);
+  // Disturbance label
+  if(norm>0.4){ x.fillStyle='rgba(239,68,68,'+norm+')'; x.font='bold 12px system-ui'; x.textAlign='center';
+    x.fillText('⚠ signal disturbed',(rX+eX)/2,26); }
+  x.textAlign='left';
+  requestAnimationFrame(drawLink);
 }
 
-// === CHART ===
+// ===== WAVEFORM =====
 function drawChart(){
-  var c=document.getElementById('chart-canvas'), cx=c.getContext('2d');
-  var cW=c.parentElement.clientWidth-32, cH=150;
-  c.width=cW*devicePixelRatio; c.height=cH*devicePixelRatio;
-  c.style.width=cW+'px'; cx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
-  cx.fillStyle='#080c18'; cx.fillRect(0,0,cW,cH);
-  // Grid
-  cx.strokeStyle='#1a1a3a'; cx.lineWidth=0.5;
-  for(var i=0;i<=10;i+=2){var y=cH-(i/10)*cH; cx.beginPath();cx.moveTo(0,y);cx.lineTo(cW,y);cx.stroke();
-    cx.fillStyle='#334';cx.font='9px system-ui';cx.fillText(i,2,y-2);}
-  // Threshold
-  var ty=cH-0.5*cH; cx.strokeStyle='rgba(239,68,68,0.3)';cx.lineWidth=1;cx.setLineDash([4,4]);
-  cx.beginPath();cx.moveTo(0,ty);cx.lineTo(cW,ty);cx.stroke();cx.setLineDash([]);
-  cx.fillStyle='#ef444480';cx.font='9px system-ui';cx.fillText('threshold',cW-50,ty-3);
+  var c=document.getElementById('chart-canvas');
+  var w=c.parentElement.clientWidth-36, h=180;
+  c.width=w*devicePixelRatio; c.height=h*devicePixelRatio;
+  c.style.width=w+'px'; c.style.height=h+'px';
+  var x=c.getContext('2d'); x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  x.fillStyle='#080c18'; x.fillRect(0,0,w,h);
+  x.strokeStyle='#1a1a3a'; x.lineWidth=0.5;
+  for(var i=0;i<=10;i+=2){var yy=h-(i/10)*h; x.beginPath();x.moveTo(0,yy);x.lineTo(w,yy);x.stroke();
+    x.fillStyle='#334';x.font='9px system-ui';x.fillText(i,2,yy-2);}
   if(history.length<2) return;
-  var step=cW/(HIST-1);
-  cx.beginPath();
-  history.forEach(function(v,i){var x=i*step,y=cH-(v/10)*cH; i===0?cx.moveTo(x,y):cx.lineTo(x,y);});
-  cx.strokeStyle='#3b82f6';cx.lineWidth=1.5;cx.stroke();
-  cx.lineTo((history.length-1)*step,cH);cx.lineTo(0,cH);cx.closePath();
-  var g=cx.createLinearGradient(0,0,0,cH);g.addColorStop(0,'rgba(59,130,246,0.25)');g.addColorStop(1,'rgba(59,130,246,0)');
-  cx.fillStyle=g;cx.fill();
+  var step=w/(HIST-1);
+  x.beginPath();
+  history.forEach(function(v,i){var xx=i*step,yy=h-(v/10)*h; i===0?x.moveTo(xx,yy):x.lineTo(xx,yy);});
+  x.strokeStyle='#3b82f6'; x.lineWidth=1.5; x.stroke();
+  x.lineTo((history.length-1)*step,h); x.lineTo(0,h); x.closePath();
+  var g=x.createLinearGradient(0,0,0,h); g.addColorStop(0,'rgba(59,130,246,0.25)'); g.addColorStop(1,'rgba(59,130,246,0)');
+  x.fillStyle=g; x.fill();
 }
 
-// Start
-drawRoom();
-setInterval(drawChart,500);
-setTimeout(connect,800);
+// Start renderers
+drawGauge(); drawLink();
+setInterval(drawChart,400);
+setTimeout(startPoll,600);
 </script>
 </body>
 </html>
