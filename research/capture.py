@@ -39,7 +39,12 @@ from pathlib import Path
 
 try:
     import mediapipe as mp
-    USE_MEDIAPIPE = True
+    # Check if legacy API (solutions.pose) is available
+    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'pose'):
+        USE_MEDIAPIPE = True
+    else:
+        USE_MEDIAPIPE = False
+        print("[INFO] mediapipe installed but legacy API not available, using motion detection")
 except ImportError:
     USE_MEDIAPIPE = False
     print("[INFO] mediapipe not installed, using basic motion detection")
