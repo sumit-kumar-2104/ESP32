@@ -254,9 +254,9 @@ class ZoneGrid:
 # ═══════════════════════════════════════════════════════════════════════════════
 class DataLogger:
     def __init__(self, output_dir="data"):
-        self.dir = Path(output_dir)
-        self.dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.dir = Path(output_dir) / f"run_{ts}"
+        self.dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = self.dir / f"zones_{ts}.csv"
         self.f = open(self.csv_path, 'w', newline='')
         self.w = csv.writer(self.f)
@@ -525,7 +525,7 @@ def main():
 
         # Save final heatmap as image
         hm = grid.get_heatmap_image(800, 600)
-        hm_path = Path(args.output) / f"heatmap_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        hm_path = logger.dir / f"heatmap_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         cv2.imwrite(str(hm_path), hm)
         print(f"[HEAT] Heatmap saved → {hm_path}")
 
@@ -538,7 +538,7 @@ def main():
             'frame_size': [fw, fh],
             'total_samples': logger.rows,
         }
-        meta_path = Path(args.output) / f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        meta_path = logger.dir / f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(meta_path, 'w') as f:
             json.dump(meta, f, indent=2)
         print(f"[META] Metadata saved → {meta_path}")

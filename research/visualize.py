@@ -244,7 +244,7 @@ def main():
     target = Path(sys.argv[1])
 
     if target.is_dir():
-        csvs = sorted(target.glob("zones_*.csv"))
+        csvs = sorted(target.glob("**/zones_*.csv"))
         if not csvs:
             print(f"No zones_*.csv files found in {target}")
             return
