@@ -23,7 +23,7 @@
 
 substitutions:
   git_ref: main                 # espectre version: branch, tag, or commit
-  detection_algorithm: mvs      # mvs = adaptive, accurate at rest (needs ~5min calibration)
+  detection_algorithm: ml       # ml = neural network, same scale as Room 2
 
 esphome:
   name: espectre
