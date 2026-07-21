@@ -2,6 +2,7 @@
 opencv-python>=4.8.0
 numpy>=1.24.0
 requests>=2.31.0
+matplotlib>=3.7.0
 
 # Best person detection (recommended). Downloads a ~6MB model on first run.
 ultralytics>=8.0.0
