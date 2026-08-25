@@ -1,0 +1,6 @@
+data/
+*.pt
+results/
+__pycache__/
+*.pyc
+.cache/

@@ -1,0 +1,4 @@
+# Never commit real WiFi credentials or build artifacts
+secrets.yaml
+.esphome/
+*.bin

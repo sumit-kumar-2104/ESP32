@@ -1,0 +1,69 @@
+# =============================================================================
+# ESPectre - ESP32 #2 (Room 2) - STANDALONE WEB DASHBOARD CONFIG
+# =============================================================================
+# Same as espectre-esp32.yaml but with a different device name so both boards
+# can run on the same WiFi network simultaneously.
+#
+# Dashboard:  http://espectre-room2.local
+# Flash:      esphome run espectre-esp32-room2.yaml
+# =============================================================================
+
+substitutions:
+  git_ref: main
+  detection_algorithm: ml
+
+esphome:
+  name: espectre-room2
+  friendly_name: ESPectre Room 2
+  min_version: 2026.5.0
+
+esp32:
+  board: esp32dev
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [ espectre ]
+
+espectre:
+  id: espectre_csi
+  detection_algorithm: ${detection_algorithm}
+  traffic_generator_rate: 200
+  traffic_generator_mode: dns
+  segmentation_threshold: 5.0
+  evaluation_interval: 10
+  movement_sensor:
+    name: "Movement Score"
+  motion_sensor:
+    name: "Motion Detected"
+  threshold_number:
+    name: "Threshold"
+  calibrate_switch:
+    name: "Calibrate"
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+  ap:
+    ssid: "ESPectre Room2 Fallback"
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+  logs:
+    sensor: INFO
+    binary_sensor: INFO
+
+ota:
+  - platform: esphome

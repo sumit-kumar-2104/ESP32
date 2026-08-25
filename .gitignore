@@ -1,5 +1,14 @@
-# Build tool + artifacts (do not zip/commit these; they are regenerated locally)
+# Large data files
+*.npz
+metaai_sim/dumps/
+metaai_sim/checkpoints/
+
+# Python
+__pycache__/
+*.pyc
 venv/
+
+# ESP32
 firmware/.esphome/
 firmware/secrets.yaml
 *.bin
