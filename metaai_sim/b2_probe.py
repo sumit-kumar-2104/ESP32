@@ -32,6 +32,7 @@ Requirements: numpy, scikit-learn, matplotlib
 Usage:        python b2_probe.py
 """
 
+import argparse
 import warnings
 from pathlib import Path
 
@@ -160,6 +161,13 @@ def mlp_factory(seed):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--features", nargs="+", default=None,
+                    help="restrict to these feature dumps, e.g. --features csi")
+    args = ap.parse_args()
+    global FEATURE_SETS
+    if args.features:
+        FEATURE_SETS = list(args.features)
     print("=" * 60)
     print("B2 — Domain-predictability probe: evaluation")
     print("=" * 60)
