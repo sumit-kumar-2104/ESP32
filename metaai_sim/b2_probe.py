@@ -51,7 +51,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 DUMPS_DIR = Path(__file__).parent / "dumps"
 RESULTS_DIR = Path(__file__).parent / "results"
-FEATURE_SETS = ["raw", "ota", "mlp", "wicbr"]
+FEATURE_SETS = ["raw", "ota", "mlp", "wicbr", "csi"]
 DOMAIN_FACTORS = ["room", "location", "orientation", "user"]
 SEEDS = [42, 123, 7]
 N_FOLDS = 5
@@ -209,10 +209,10 @@ def main():
             y_key = f"y_{factor}"
 
             # Drop room factor from BVP charts — BVP removes environment info.
-            # Keep in code for when CSI is used (where room IS the channel).
-            if factor == "room" and not USE_CSI:
+            # Keep it when a CSI dump is loaded (where room IS the channel).
+            if factor == "room" and "csi" not in loaded:
                 print(f"\n  [skip] '{factor}' — uninformative for BVP (environment removed by "
-                      f"BVP extraction). Will be relevant when USE_CSI=True.")
+                      f"BVP extraction). Relevant only when a csi.npz dump is present.")
                 continue
 
             print(f"\n{'='*70}")
