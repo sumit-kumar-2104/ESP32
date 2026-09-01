@@ -15,6 +15,30 @@ startup, and writes a timestamped log to `logs/`. Nothing is fabricated: if the
 raw CSI (or a matching dump) is missing, the script fails loudly with the exact
 command to run.
 
+## Honest state (2026-09-02, branch `fix/indomain-and-c1`)
+
+- **DFS probe ceiling ~63% (MLP) / ~61% (LogReg)** in-domain. Realistic
+  in-domain target on DFS features is therefore **~50-60%** for a
+  linear + magnitude OTA model. The 80% number from the earlier BVP
+  pipeline is **not** reachable on DFS features — that ceiling requires
+  raw CSI (or BVP).
+- **The recent server-run collapse was a TRAINING-LOOP / gradient bug**,
+  not features, labels, normalization, or forward-path scale. Phase-0
+  (`diagnose_indomain.py`) confirmed features + labels are fine and the
+  OTA forward magnitudes are healthy. Task A (`diagnose_training.py`) is
+  the next step — it instruments gradient norms + STE + softmax entropy
+  to localize the dead path. Fix hooks (`fix_pipeline.enable_hook_STE`,
+  `enable_hook_HEAD_LR`) are DISABLED by default until Task A points to
+  one of them.
+- **Raw CSI (Phase 2) is required to target ~80%**. Its probe ceiling is
+  being verified in `diagnose_indomain.py --features raw_csi` before we
+  invest in OTA retraining on it. Run that BEFORE enabling any raw-CSI
+  gate at `--target-acc 0.70`.
+- Downstream gated scripts (`c1_gate.py`, `b4_dose_response.py`,
+  `leave_one_domain_out.py`) now default `--indomain-threshold` to 0.50
+  (honest DFS floor) and accept `--target-acc` as an alias. For raw CSI,
+  pass `--target-acc 0.70` (or higher) explicitly.
+
 ## Feature modes (`data/csi_loader.py`)
 
 `--feature` selects the per-sample CSI feature vector (subcarrier axis kept):
