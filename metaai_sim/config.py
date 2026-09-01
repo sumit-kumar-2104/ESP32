@@ -78,6 +78,61 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def get_raw_csi_dir() -> Path:
+    """
+    Resolve the RAW Widar3.0 CSI directory (Intel 5300 .dat files).
+
+    Priority (highest first):
+      1) METAAI_RAW_CSI_DIR env var (explicit override)
+      2) METAAI_DATA_DIR / widar3 / CSI  (via get_data_dir())
+
+    This function does NOT create the directory — raw CSI must be present
+    already, populated from the IEEE DataPort Widar3.0 release. Callers that
+    require raw CSI (e.g. `b2_dump_csi.py --input raw_csi`) should call
+    `require_raw_csi_dir()` instead, which raises a loud message if missing.
+
+    See README_raw_csi.md for the expected directory layout.
+    """
+    env = os.environ.get("METAAI_RAW_CSI_DIR")
+    if env:
+        return Path(env)
+    return get_data_dir() / "widar3" / "CSI"
+
+
+def require_raw_csi_dir() -> Path:
+    """Return the raw CSI root, or fail LOUDLY with a fix message.
+
+    Use this when a script's `--input raw_csi` opt-in is set. Silent
+    fallback to BVP or a synthetic feature is FORBIDDEN.
+    """
+    root = get_raw_csi_dir()
+    if root.exists() and any(root.iterdir()):
+        return root
+    msg = [
+        "",
+        "=" * 70,
+        "FATAL: raw Widar3.0 CSI directory not found (or empty).",
+        "=" * 70,
+        f"  Expected at: {root}",
+        "",
+        "  Fix by ONE of:",
+        f"    1) export METAAI_RAW_CSI_DIR=/path/to/widar3/CSI",
+        f"    2) export METAAI_DATA_DIR=/path/whose/widar3/CSI/exists",
+        f"    3) populate the default location above",
+        "",
+        "  What to download:",
+        "    Widar3.0 raw CSI, Intel 5300 .dat files, from IEEE DataPort",
+        "    (https://ieee-dataport.org/open-access/widar-30-wifi-based-activity-recognition-dataset).",
+        "",
+        "  See README_raw_csi.md in this repo for the exact directory",
+        "  layout and filename convention expected by the loader.",
+        "=" * 70,
+        "",
+    ]
+    print("\n".join(msg))
+    sys.exit(1)
+
+
 def print_data_info(data_dir: Path) -> None:
     """Print resolved data path and download status."""
     mnist_exists = (data_dir / "MNIST").exists()

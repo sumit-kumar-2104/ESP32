@@ -11,6 +11,12 @@ Usage:
     python b2_dump_csi.py --dates 20181109 20181118 20181117
     python b2_dump_csi.py --csi-root /path/to/widar3/CSI --users 2 3
     python b2_dump_csi.py --feature amp_phase --balance-room --seed 42
+
+Opt-in `--input raw_csi` (Phase 2):
+    Force the loader to use RAW Widar3.0 CSI resolved via METAAI_RAW_CSI_DIR
+    (or METAAI_DATA_DIR/widar3/CSI). If the raw tree is missing, the script
+    fails LOUDLY with an explicit fix message — no silent fallback. See
+    README_raw_csi.md for the expected directory layout.
 """
 
 import argparse
@@ -31,13 +37,18 @@ from config import setup_logging, print_device, set_seed
 
 
 def default_csi_root() -> Path:
-    from config import get_data_dir
-    return get_data_dir() / "widar3" / "CSI"
+    from config import get_raw_csi_dir
+    return get_raw_csi_dir()
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csi-root", default=None)
+    ap.add_argument("--input", choices=["auto", "raw_csi"], default="auto",
+                    help="'auto' (default) = legacy resolve (env var or "
+                         "get_data_dir/widar3/CSI). 'raw_csi' = require the "
+                         "raw Widar3.0 CSI tree and fail loudly if missing; "
+                         "no silent fallback to DFS or BVP.")
     ap.add_argument("--dates", nargs="+", default=["20181109", "20181118"])
     ap.add_argument("--users", nargs="+", type=int, default=[2, 3],
                     help="user ids to keep (empty = all)")
@@ -61,11 +72,25 @@ def main():
     print_device()
     set_seed(args.seed)
 
-    csi_root = Path(args.csi_root) if args.csi_root else default_csi_root()
+    # Resolve the CSI root. `--input raw_csi` promotes the check from "warn +
+    # scan for .dat files" to "fail loudly with a fix message" if the raw
+    # tree is missing. `--csi-root` still wins if the user passes it.
+    if args.csi_root:
+        csi_root = Path(args.csi_root)
+        if args.input == "raw_csi" and not (csi_root.exists() and any(csi_root.iterdir())):
+            from config import require_raw_csi_dir
+            # Print the same diagnostic and stop.
+            require_raw_csi_dir()
+    elif args.input == "raw_csi":
+        from config import require_raw_csi_dir
+        csi_root = require_raw_csi_dir()
+    else:
+        csi_root = default_csi_root()
+
     out = Path(args.out) if args.out else Path(__file__).parent / "dumps" / "csi.npz"
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"[csi-dump] root={csi_root}")
+    print(f"[csi-dump] root={csi_root}   input-mode={args.input}")
     print(f"[csi-dump] dates={args.dates} users={args.users} gestures={args.gestures}")
     print(f"[csi-dump] feature={args.feature} dfs_bins={args.dfs_bins} "
           f"balance_room={args.balance_room}")
