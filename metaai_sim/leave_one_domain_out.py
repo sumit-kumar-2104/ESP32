@@ -112,7 +112,9 @@ def main():
                     dest="lambda_dann")
     ap.add_argument("--lambda-dann-warmup-epochs", type=int, default=50,
                     dest="lambda_dann_warmup_epochs")
-    ap.add_argument("--indomain-threshold", type=float, default=0.60)
+    ap.add_argument("--indomain-threshold", "--target-acc", type=float,
+                    default=0.50, dest="indomain_threshold",
+                    help="honest DFS default 0.50; raw CSI: pass 0.70+.")
     args = ap.parse_args()
 
     setup_logging("leave_one_domain_out")

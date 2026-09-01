@@ -123,7 +123,9 @@ def main():
     ap.add_argument("--seeds", nargs="+", type=int, default=[42, 123, 7])
     ap.add_argument("--sigma-grid", nargs="+", type=float,
                     default=[0.0, 0.05, 0.1, 0.2, 0.4, 0.8, 1.5])
-    ap.add_argument("--indomain-threshold", type=float, default=0.60)
+    ap.add_argument("--indomain-threshold", "--target-acc", type=float,
+                    default=0.50, dest="indomain_threshold",
+                    help="honest DFS default 0.50; raw CSI: pass 0.70+.")
     args = ap.parse_args()
 
     setup_logging("b4_dose_response")

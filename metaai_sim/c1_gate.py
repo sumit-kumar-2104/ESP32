@@ -363,9 +363,12 @@ def main():
     ap.add_argument("--lambda-dann", type=float, default=0.3, dest="lambda_dann")
     ap.add_argument("--lambda-irm", type=float, default=1.0, dest="lambda_irm")
     ap.add_argument("--lambda-coral", type=float, default=1.0, dest="lambda_coral")
-    ap.add_argument("--indomain-threshold", type=float, default=0.60,
+    ap.add_argument("--indomain-threshold", "--target-acc", type=float,
+                    default=0.50, dest="indomain_threshold",
                     help="floor for OTA_plain in-domain accuracy; below this "
-                         "the script refuses to print cross-room numbers.")
+                         "the script refuses to print cross-room numbers. "
+                         "Default 0.50 is honest for DFS (probe ceiling ~63%%). "
+                         "For raw CSI pass --target-acc 0.70 or higher.")
     ap.add_argument("--objectives", nargs="+", choices=OBJECTIVES,
                     default=OBJECTIVES)
     args = ap.parse_args()
