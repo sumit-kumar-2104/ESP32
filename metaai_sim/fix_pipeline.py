@@ -88,10 +88,13 @@ def enable_hook_HEAD_LR() -> None:
 
 def disable_all_hooks() -> None:
     global _HOOK_A_ENABLED, _HOOK_B_ENABLED, _HOOK_STE_ENABLED, _HOOK_HEAD_LR_ENABLED
+    global _HOOK_R1_ENABLED, _HOOK_R2_ENABLED
     _HOOK_A_ENABLED = False
     _HOOK_B_ENABLED = False
     _HOOK_STE_ENABLED = False
     _HOOK_HEAD_LR_ENABLED = False
+    _HOOK_R1_ENABLED = False
+    _HOOK_R2_ENABLED = False
 
 
 def is_hook_A_enabled() -> bool:
@@ -264,6 +267,243 @@ def head_param_groups(model, base_lr: float, head_lr_mult: float = 10.0,
     return groups
 
 
+# ─── HOOK R1: continuous-OTA overfit fix ─────────────────────────────────────
+#
+# Task-A finding: with the continuous ComplexLinear on dfs_full the OTA path
+# reaches TRAIN 100% / VAL 41% while the plain-linear control reaches VAL 62%
+# — pure overfit, not a gradient bug. HOOK R1 adds three OPT-IN levers:
+#
+#   * weight decay      (--wd,          default 1e-4)
+#   * input dropout     (--dropout,     default 0.3)  applied to the real
+#                                       feature vector *before* it is lifted
+#                                       to complex and hit by ComplexLinear.
+#                                       The OTA model has no separate
+#                                       classifier head (`|y|` IS the logit),
+#                                       so this is the honest "dropout before
+#                                       the classifier" placement.
+#   * complex-dim bottleneck (--complex-dim)  optional real Linear projection
+#                                       input_dim -> complex_dim inserted
+#                                       BEFORE the ComplexLinear, cutting
+#                                       parameter count on high-dim inputs.
+#   * early stop on val (--patience)   returned in `r1_config()` so the
+#                                       training loop can consume it directly.
+#
+# Nothing is applied unless `enable_hook_R1()` is called. `make_r1_ota_model`
+# builds the wrapper explicitly; existing scripts that instantiate
+# ComplexLinear directly are unaffected.
+
+_HOOK_R1_ENABLED = False
+_R1_CFG = {"wd": 1e-4, "dropout": 0.3, "complex_dim": None, "patience": 8}
+
+
+def enable_hook_R1(wd: float = 1e-4, dropout: float = 0.3,
+                   complex_dim: Optional[int] = None,
+                   patience: int = 8) -> None:
+    """Opt into HOOK R1 (continuous overfit fixes)."""
+    global _HOOK_R1_ENABLED
+    _HOOK_R1_ENABLED = True
+    _R1_CFG.update({
+        "wd": float(wd),
+        "dropout": float(dropout),
+        "complex_dim": (int(complex_dim) if complex_dim else None),
+        "patience": int(patience),
+    })
+
+
+def is_hook_R1_enabled() -> bool:
+    return _HOOK_R1_ENABLED
+
+
+def r1_config() -> dict:
+    return dict(_R1_CFG)
+
+
+def make_r1_ota_model(input_dim: int, num_classes: int):
+    """Build the R1-wrapped OTA model. Falls back to plain ComplexLinear when
+    HOOK R1 is disabled."""
+    import torch
+    import torch.nn as nn
+    from models.linear_complex import ComplexLinear
+
+    if not _HOOK_R1_ENABLED:
+        return ComplexLinear(input_dim, num_classes)
+
+    cfg = r1_config()
+    complex_dim = cfg["complex_dim"]
+    dropout_p = cfg["dropout"]
+
+    class _R1OTAModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.drop = nn.Dropout(dropout_p)
+            if complex_dim is not None and 0 < complex_dim < input_dim:
+                self.proj = nn.Linear(input_dim, complex_dim, bias=False)
+                comp_in = complex_dim
+            else:
+                self.proj = None
+                comp_in = input_dim
+            self.complex = ComplexLinear(comp_in, num_classes)
+            # Expose the complex layer's weights under stable names so the
+            # optimizer / grad-instrumentation helpers can find them.
+            self.weight_real = self.complex.weight_real
+            self.weight_imag = self.complex.weight_imag
+
+        def forward(self, x):
+            # `x` is expected as either a REAL (batch, D) tensor OR the
+            # legacy complex tensor. The OTA path historically feeds a
+            # complex tensor; here we accept both so `train_ab_dfs.py` and
+            # `train_raw_csi.py` can share this wrapper.
+            if torch.is_complex(x):
+                x = x.real
+            x = self.drop(x)
+            if self.proj is not None:
+                x = self.proj(x)
+            xc = torch.complex(x, torch.zeros_like(x))
+            return self.complex(xc)
+
+    return _R1OTAModel()
+
+
+# ─── HOOK R2: quantized-OTA under-learn fix ──────────────────────────────────
+#
+# Task-A finding: with 2-bit DiscreteComplexLinear the gradient reaching the
+# complex weights is ~14x smaller than the plain-linear control's head
+# gradient, and softmax entropy stays near uniform. STE itself WORKS (grad
+# flows) — the issue is grad MAGNITUDE. HOOK R2 addresses that directly:
+#
+#   * --qgrad-scale  multiply the STE backward by a constant so grad magnitude
+#                     matches (or exceeds) the control head. Default 8.0
+#                     roughly offsets the observed ~14x shrink after Adam's
+#                     per-parameter normalization.
+#   * --lr-complex   optional separate learning rate ONLY for the complex
+#                     weights (weight_real / weight_imag), applied via the
+#                     `r2_param_groups()` helper.
+#   * --ste hardtanh optional hardtanh-clipped identity surrogate on backward
+#                     (clamps grad to [-1, 1] before scaling) — protects
+#                     against occasional grad spikes when the pre-quant
+#                     weights land near a phasor boundary.
+#
+# Nothing is applied unless `enable_hook_R2()` is called. Use the factory
+# `make_r2_ota_model` (which returns `R2DiscreteComplexLinear` when the hook
+# is on, and plain `DiscreteComplexLinear` otherwise).
+
+_HOOK_R2_ENABLED = False
+_R2_CFG = {"qgrad_scale": 8.0, "lr_complex": None, "ste_kind": "identity"}
+_R2_STE_KINDS = ("identity", "hardtanh")
+
+
+def enable_hook_R2(qgrad_scale: float = 8.0,
+                   lr_complex: Optional[float] = None,
+                   ste_kind: str = "identity") -> None:
+    """Opt into HOOK R2 (quantized under-learn fixes)."""
+    global _HOOK_R2_ENABLED
+    if ste_kind not in _R2_STE_KINDS:
+        raise ValueError(f"ste_kind must be one of {_R2_STE_KINDS}")
+    _HOOK_R2_ENABLED = True
+    _R2_CFG.update({
+        "qgrad_scale": float(qgrad_scale),
+        "lr_complex": (float(lr_complex) if lr_complex is not None else None),
+        "ste_kind": str(ste_kind),
+    })
+
+
+def is_hook_R2_enabled() -> bool:
+    return _HOOK_R2_ENABLED
+
+
+def r2_config() -> dict:
+    return dict(_R2_CFG)
+
+
+class _R2GradScaleSTE(__import__("torch").autograd.Function):
+    """Forward = nearest 2-bit phasor. Backward = optionally hardtanh-clipped
+    identity, multiplied by qgrad_scale."""
+
+    @staticmethod
+    def forward(ctx, w_real, w_imag, phase_states, qgrad_scale, ste_kind):
+        import torch
+        w_complex = torch.complex(w_real, w_imag)
+        angles = torch.angle(w_complex)
+        phase_vals = phase_states.to(w_real.device)
+        diff = angles.unsqueeze(-1) - phase_vals.view(*([1] * angles.dim()), -1)
+        diff = (diff + torch.pi) % (2 * torch.pi) - torch.pi
+        idx = torch.argmin(torch.abs(diff), dim=-1)
+        chosen = phase_vals[idx]
+        q_real = torch.cos(chosen)
+        q_imag = torch.sin(chosen)
+        ctx.qgrad_scale = float(qgrad_scale)
+        ctx.ste_kind = str(ste_kind)
+        return q_real, q_imag
+
+    @staticmethod
+    def backward(ctx, grad_q_real, grad_q_imag):
+        import torch
+        gr = grad_q_real
+        gi = grad_q_imag
+        if ctx.ste_kind == "hardtanh":
+            gr = torch.clamp(gr, -1.0, 1.0)
+            gi = torch.clamp(gi, -1.0, 1.0)
+        s = ctx.qgrad_scale
+        return gr * s, gi * s, None, None, None
+
+
+def make_r2_ota_model(input_dim: int, num_classes: int):
+    """Build the R2-wrapped quantized OTA model. Falls back to plain
+    DiscreteComplexLinear when HOOK R2 is disabled."""
+    import torch
+    from models.discrete_nn import DiscreteComplexLinear
+
+    if not _HOOK_R2_ENABLED:
+        return DiscreteComplexLinear(input_dim, num_classes)
+
+    cfg = r2_config()
+    qs = cfg["qgrad_scale"]
+    kind = cfg["ste_kind"]
+
+    class R2DiscreteComplexLinear(DiscreteComplexLinear):
+        @property
+        def complex_weight(self):
+            from config import PHASE_STATES
+            phase_states = torch.tensor(
+                PHASE_STATES, dtype=torch.float32,
+                device=self.weight_real.device,
+            )
+            qr, qi = _R2GradScaleSTE.apply(
+                self.weight_real, self.weight_imag,
+                phase_states, qs, kind,
+            )
+            return torch.complex(qr, qi)
+
+    return R2DiscreteComplexLinear(input_dim, num_classes)
+
+
+def r2_param_groups(model, base_lr: float):
+    """Return optimizer param groups honoring `--lr-complex` when R2 is on.
+
+    Groups the complex weights (`weight_real`, `weight_imag`) at `lr_complex`
+    and everything else at `base_lr`. When R2 is off or `--lr-complex` is
+    unset, returns a single group at `base_lr`.
+    """
+    lrc = _R2_CFG["lr_complex"] if _HOOK_R2_ENABLED else None
+    if lrc is None:
+        return [{"params": [p for p in model.parameters() if p.requires_grad],
+                 "lr": base_lr}]
+    complex_params, other = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name.endswith("weight_real") or name.endswith("weight_imag"):
+            complex_params.append(p)
+        else:
+            other.append(p)
+    groups = []
+    if other:
+        groups.append({"params": other, "lr": base_lr})
+    if complex_params:
+        groups.append({"params": complex_params, "lr": lrc})
+    return groups
+
+
 # ─── Cross-domain safety gate ─────────────────────────────────────────────────
 
 # Phase-0 diagnosis: DFS probe ceiling is ~63% (MLP) / ~61% (LogReg). A 60%
@@ -341,10 +581,18 @@ if __name__ == "__main__":
     print("fix_pipeline: HOOK B       enabled =", is_hook_B_enabled())
     print("fix_pipeline: HOOK STE     enabled =", is_hook_STE_enabled())
     print("fix_pipeline: HOOK HEAD_LR enabled =", is_hook_HEAD_LR_enabled())
+    print("fix_pipeline: HOOK R1      enabled =", is_hook_R1_enabled())
+    print("fix_pipeline: HOOK R2      enabled =", is_hook_R2_enabled())
     print("fix_pipeline: rescale factor for (U=1536, R=6) =",
           output_rescale_factor(1536, 6))
     print("fix_pipeline: rescale factor for (U=150,  R=6) =",
           output_rescale_factor(150, 6))
+    # R1 / R2 opt-in surface
+    enable_hook_R1(wd=1e-3, dropout=0.4, complex_dim=512, patience=6)
+    print("fix_pipeline: R1 cfg =", r1_config())
+    enable_hook_R2(qgrad_scale=8.0, lr_complex=5e-3, ste_kind="hardtanh")
+    print("fix_pipeline: R2 cfg =", r2_config())
+    disable_all_hooks()
     try:
         assert_indomain_ok(0.24)
     except IndomainCheckFailed as e:

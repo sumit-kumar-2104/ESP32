@@ -17,27 +17,95 @@ command to run.
 
 ## Honest state (2026-09-02, branch `fix/indomain-and-c1`)
 
-- **DFS probe ceiling ~63% (MLP) / ~61% (LogReg)** in-domain. Realistic
-  in-domain target on DFS features is therefore **~50-60%** for a
-  linear + magnitude OTA model. The 80% number from the earlier BVP
-  pipeline is **not** reachable on DFS features — that ceiling requires
-  raw CSI (or BVP).
-- **The recent server-run collapse was a TRAINING-LOOP / gradient bug**,
-  not features, labels, normalization, or forward-path scale. Phase-0
-  (`diagnose_indomain.py`) confirmed features + labels are fine and the
-  OTA forward magnitudes are healthy. Task A (`diagnose_training.py`) is
-  the next step — it instruments gradient norms + STE + softmax entropy
-  to localize the dead path. Fix hooks (`fix_pipeline.enable_hook_STE`,
-  `enable_hook_HEAD_LR`) are DISABLED by default until Task A points to
-  one of them.
-- **Raw CSI (Phase 2) is required to target ~80%**. Its probe ceiling is
-  being verified in `diagnose_indomain.py --features raw_csi` before we
-  invest in OTA retraining on it. Run that BEFORE enabling any raw-CSI
-  gate at `--target-acc 0.70`.
-- Downstream gated scripts (`c1_gate.py`, `b4_dose_response.py`,
-  `leave_one_domain_out.py`) now default `--indomain-threshold` to 0.50
-  (honest DFS floor) and accept `--target-acc` as an alias. For raw CSI,
-  pass `--target-acc 0.70` (or higher) explicitly.
+- **DFS: plain-linear control 62% ≈ probe ceiling 63%; OTA penalty ~20pp
+  = continuous overfit + quantized grad-starvation (STE works, not a
+  dead gradient).**
+  - Continuous `ComplexLinear` OVERFITS on `dfs_full` — train 100 / val 41
+    vs plain-linear control val 62. Fix hook **R1** (weight decay, input
+    dropout, optional complex-dim bottleneck, early-stop on val) is
+    opt-in via `train_ab_dfs.py --enable R1`.
+  - 2-bit `DiscreteComplexLinear` UNDER-LEARNS — grad through the complex
+    layer ≈ 0.08 vs control ≈ 1.13 (~14× smaller), softmax entropy stuck
+    near uniform. Fix hook **R2** (grad-scaled STE with `--qgrad-scale`,
+    optional separate `--lr-complex`, optional hardtanh-clipped STE
+    surrogate) is opt-in via `train_ab_dfs.py --enable R2`.
+  - **STE is confirmed working** (`diagnose_training.py` A.2 check +
+    Task-A grad-norms). Do NOT touch STE as a fix — the earlier
+    `enable_hook_STE` / `enable_hook_HEAD_LR` scaffolding is left
+    disabled and unused.
+- **Raw CSI probe ceiling ≈ 95%** (Phase-0 LogReg 92.67% / MLP 94.67%,
+  chance 20%, dim=5760). Phase-2 in-domain OTA target on raw CSI is
+  ≈ 80% and is trained end-to-end by `train_raw_csi.py --target-acc 0.70`
+  (fails LOUDLY if the raw Widar3.0 CSI directory is missing — no silent
+  DFS fallback).
+- **All in-domain loops fit StandardScaler on the TRAIN fold only.**
+  `train_ab_dfs.py` and `train_raw_csi.py` assert
+  `sc.n_samples_seen_ == len(X_train)` at runtime; leaked stats stop
+  the run.
+- Downstream gated scripts (`c1_gate.py`, `b3_cka.py`,
+  `b4_dose_response.py`, `leave_one_domain_out.py`) default
+  `--indomain-threshold` to 0.50 (honest DFS floor) and accept
+  `--target-acc` as an alias. For raw CSI, pass `--target-acc 0.70` (or
+  higher) explicitly.
+
+## DFS OTA fix hooks — A/B on `dfs_full` (`train_ab_dfs.py`)
+
+Runs one short in-domain train per invocation on `dfs_full` and prints
+train/val curves, weight-grad norms, softmax entropy, and `|y|` mean.
+Three arms:
+
+- `--enable none` — baseline `ComplexLinear`, `--wd` / `--patience` still
+  honoured. Reproduces the Task-A control number.
+- `--enable R1` — `--wd`, `--dropout`, optional `--complex-dim`
+  bottleneck, early-stop on val (`--patience`). Fixes the continuous
+  overfit (train 100 / val 41).
+- `--enable R2` — grad-scaled STE on `DiscreteComplexLinear`
+  (`--qgrad-scale`, default 8.0), optional `--lr-complex`, optional
+  `--ste hardtanh` surrogate. Fixes the quantized ~14× grad shrink.
+
+`--enable` swaps only the model / optimizer wiring; data, seed, scaler
+(train-only), and val split are identical across arms.
+
+```bash
+# baseline
+python train_ab_dfs.py --dates 20181109 --epochs 40 \
+    | tee logs/dfs_ab_baseline_$(date +%Y%m%d_%H%M%S).log
+
+# R1 — continuous overfit fix
+python train_ab_dfs.py --dates 20181109 --epochs 40 \
+    --enable R1 --wd 1e-3 --dropout 0.4 --complex-dim 512 --patience 6 \
+    | tee logs/dfs_ab_R1_$(date +%Y%m%d_%H%M%S).log
+
+# R2 — quantized under-learn fix (2-bit + grad-scaled STE)
+python train_ab_dfs.py --dates 20181109 --epochs 40 \
+    --enable R2 --qgrad-scale 8.0 --lr-complex 5e-3 --ste hardtanh \
+    | tee logs/dfs_ab_R2_$(date +%Y%m%d_%H%M%S).log
+```
+
+## Raw-CSI Phase-2 in-domain trainer (`train_raw_csi.py`)
+
+Only `--input raw_csi` is accepted; there is no silent DFS fallback. The
+loader asserts on missing raw Widar3.0 CSI and prints the exact
+IEEE-DataPort download instructions. StandardScaler is fit on the TRAIN
+fold only, asserted at runtime. Target-acc default 0.70; gated by
+`assert_indomain_ok`.
+
+```bash
+python train_raw_csi.py --input raw_csi --dates 20181109 \
+    --epochs 40 --target-acc 0.70 \
+    | tee logs/raw_csi_baseline_$(date +%Y%m%d_%H%M%S).log
+
+# R1 or R2 hooks are available with the same flags as train_ab_dfs.py:
+python train_raw_csi.py --input raw_csi --dates 20181109 \
+    --epochs 40 --target-acc 0.70 \
+    --enable R1 --wd 1e-3 --dropout 0.4 --complex-dim 1024 --patience 6 \
+    | tee logs/raw_csi_R1_$(date +%Y%m%d_%H%M%S).log
+```
+
+If the raw CSI directory is missing the script fails with a message
+listing the exact `METAAI_RAW_CSI_DIR` / `METAAI_DATA_DIR` variables and
+the IEEE-DataPort URL to download the Widar3.0 Intel-5300 `.dat` files
+from. See `README_raw_csi.md` for the expected directory layout.
 
 ## Feature modes (`data/csi_loader.py`)
 

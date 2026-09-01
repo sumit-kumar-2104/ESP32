@@ -147,7 +147,9 @@ def main():
     ap.add_argument("--users", nargs="+", type=int, default=[2, 3])
     ap.add_argument("--gestures", nargs="+", type=int, default=[1, 2, 3, 5, 6])
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--indomain-threshold", type=float, default=0.60)
+    ap.add_argument("--indomain-threshold", "--target-acc", type=float,
+                    default=0.50, dest="indomain_threshold",
+                    help="honest DFS default 0.50; raw CSI: pass 0.70+.")
     args = ap.parse_args()
 
     setup_logging("b3_cka")
