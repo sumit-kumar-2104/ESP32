@@ -19,11 +19,12 @@ command to run.
 
 `--feature` selects the per-sample CSI feature vector (subcarrier axis kept):
 
-| mode        | dim | per receiver (×6)                                        |
-|-------------|-----|----------------------------------------------------------|
-| `amp` (def) | 360 | `[mean_t(amp)(30), std_t(amp)(30)]` = 60                 |
-| `amp_phase` | 720 | amp(60) + sanitized-phase `[mean_t(30), std_t(30)]` = 60 |
-| `amp_dfs`   | 456 | amp(60) + compact Doppler low-freq band = 16             |
+| mode         | dim  | per receiver (×6)                                                                                                        |
+|--------------|------|--------------------------------------------------------------------------------------------------------------------------|
+| `amp` (def)  | 360  | `[mean_t(amp)(30), std_t(amp)(30)]` = 60                                                                                 |
+| `amp_phase`  | 720  | amp(60) + sanitized-phase `[mean_t(30), std_t(30)]` = 60                                                                 |
+| `amp_dfs`    | 456  | amp(60) + compact Doppler low-freq band = 16                                                                             |
+| `dfs_spec`   | 1536 | Doppler-frequency spectrogram, `(DFS_SPEC_BINS=16, DFS_SPEC_FRAMES=16)` per rx = 256; **time axis preserved (no mean/std)** |
 
 - `amp` is the original, unchanged behaviour.
 - `amp_phase` unwraps phase across subcarriers and removes the per-packet linear
@@ -31,6 +32,15 @@ command to run.
 - `amp_dfs` takes an STFT along the packet/time axis of the DC-removed amplitude,
   averages magnitude over subcarriers and time frames, and keeps the first
   `DFS_BINS = 16` low-frequency bins.
+- `dfs_spec` is the Doppler-**preserving** feature added for stage 5. For each
+  receiver: DC-detrend the antenna-averaged amplitude, run an STFT along the
+  packet/time axis per subcarrier, take magnitude, average over subcarriers to
+  get a `(F, frames)` map, keep the first `DFS_SPEC_BINS=16` low-Doppler bins,
+  and linearly resample the STFT time axis to a fixed `DFS_SPEC_FRAMES=16` (pad
+  short recordings, downsample long ones). Output per receiver:
+  `16 × 16 = 256`. Concatenated over 6 receivers → **1536 dim**. The temporal
+  micro-Doppler axis is **not** collapsed to `mean_t/std_t`, which is what
+  makes gesture/orientation content survive.
 
 ## Task 1 — Room-balanced dump
 
@@ -44,27 +54,62 @@ python b2_dump_csi.py --feature amp --balance-room --seed 42
 
 # phase-augmented, room-balanced
 python b2_dump_csi.py --feature amp_phase --balance-room --seed 42
+
+# Doppler-preserving spectrogram, room-balanced (the stage-5 feature)
+python b2_dump_csi.py --balance-room --feature dfs_spec --seed 42
 ```
 
-The dump records which `--feature` built it and whether it was balanced.
+The dump records which `--feature` built it and whether it was balanced, and
+prints the exact output dim (`per_rx=256, receivers=6, total=1536` for
+`dfs_spec`) at dump time.
 
-## Task 3 — Isolation experiment (the key result)
+## Task 2 — Re-run the B2 domain probe on the fresh dump
 
-Same balanced cross-room CSI dump and same grouped cross-room split; only the
-computation changes: `OTA_linear` (complex linear + |.| magnitude, argmax) vs
-`Digital_MLP` (small real MLP). Reports in-domain vs cross-room accuracy +
-macro-F1 (mean±std over 3 seeds) for both, then probes room/location/user
-decodability from each model's COMPUTED (penultimate/pre-argmax) features.
+`b2_probe.py` reads `dumps/csi.npz` and reports linear + MLP decodability of
+room / location / orientation / user, plus a gesture control. Run it after
+building each dump you want to compare:
 
 ```bash
-python b5_isolation.py --features csi --balance-room --feature amp_phase --seed 42
+python b2_probe.py --features csi
 ```
 
-Outputs written to `results/`:
+## Task 3 — Isolation experiment with all three models
 
-- `b5_isolation_summary.csv` — model × {in-dom acc, cross-room acc,
-  room-decodability-from-computed-features, loc/user decodability, room chance}
-- `b5_confusion_OTA_linear.png`, `b5_confusion_Digital_MLP.png` (+ `.npy`)
+Same balanced cross-room CSI dump and same grouped cross-room split; only the
+computation changes:
+
+- `OTA_linear`  — complex linear + `|.|` magnitude readout, argmax.
+- `Digital_MLP` — small real MLP (Linear-ReLU-Linear-ReLU-Linear).
+- `Digital_DANN` — same MLP backbone plus a room-domain head fed through a
+  Gradient-Reversal Layer (Ganin & Lempitsky 2015). Cross-room training uses
+  the source room labeled and the target room's features (labels unused) as
+  the unlabeled target for the domain-invariance loss, scaled by
+  `--lambda_dann` (default 0.5). In-domain CV uses only the training fold's
+  own room labels as the invariance signal, so it never peeks at the test set.
+
+Reports in-domain and cross-room accuracy + macro-F1 (mean±std over 3 seeds)
+for every selected model, and probes room/location/user decodability from each
+model's computed (penultimate/pre-argmax) features.
+
+```bash
+# All three models on the Doppler-preserving feature
+python b5_isolation.py --features csi --balance-room --feature dfs_spec \
+    --models OTA_linear Digital_MLP Digital_DANN --seed 42
+
+# Any subset works; original two-model behaviour is the default
+python b5_isolation.py --features csi --balance-room --feature dfs_spec \
+    --models Digital_DANN --lambda_dann 0.8 --seed 42
+```
+
+Outputs (in `results/`):
+
+- `b5_isolation_summary.csv` — appended row per (`feature_mode`, model) with
+  `in_dom_acc, in_dom_f1, cross_room_acc, cross_room_f1,
+  room_decodability, loc_decodability, user_decodability, room_chance,
+  lambda_dann`. Different `--feature` runs never overwrite each other because
+  the `feature_mode` column is part of every row.
+- `b5_confusion_<model>_<feature>.png` / `.npy` — cross-room gesture confusion
+  matrices per model, tagged with the feature mode.
 
 If `dumps/csi.npz` already exists and was built with the same `--feature`, b5
 reuses it; otherwise it rebuilds the CSI features from the raw tree. Pass
@@ -74,4 +119,22 @@ reuses it; otherwise it rebuilds the CSI features from the raw tree. Pass
 
 ```bash
 python b2_probe.py --features csi
+```
+
+## End-to-end recipe (`tf` env, stage-5 defaults)
+
+```bash
+conda activate tf
+export METAAI_DATA_DIR=~/scratch/metaai_data
+cd MPL/metaai_sim
+
+# (a) build a dfs_spec balanced dump
+python b2_dump_csi.py --balance-room --feature dfs_spec --seed 42
+
+# (b) re-run b2_probe on the fresh dump
+python b2_probe.py --features csi
+
+# (c) run b5_isolation with all three models
+python b5_isolation.py --features csi --balance-room --feature dfs_spec \
+    --models OTA_linear Digital_MLP Digital_DANN --seed 42
 ```

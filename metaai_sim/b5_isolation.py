@@ -5,11 +5,18 @@ environment-specific collapse?
 On the SAME balanced cross-room CSI dump and the SAME grouped cross-room split,
 we vary ONLY the computation used to turn features into a gesture decision:
 
-    (a) OTA_linear  — a complex linear layer followed by a magnitude |.|
-                      readout, argmax over class scores. This mirrors the MetaAI
-                      over-the-air forward pass (paper Eqn. 3: y_r = |Σ H·x|).
-    (b) Digital_MLP — a small real-valued MLP (Linear-ReLU-Linear-ReLU-Linear)
-                      on the exact same standardized input.
+    (a) OTA_linear   — a complex linear layer followed by a magnitude |.|
+                       readout, argmax over class scores. This mirrors the
+                       MetaAI over-the-air forward pass (paper Eqn. 3:
+                       y_r = |Σ H·x|).
+    (b) Digital_MLP  — a small real-valued MLP (Linear-ReLU-Linear-ReLU-
+                       Linear) on the exact same standardized input.
+    (c) Digital_DANN — same MLP backbone as Digital_MLP, plus a room-domain
+                       classifier head fed through a gradient-reversal layer
+                       (Ganin & Lempitsky 2015). Trained jointly with the
+                       gesture CE loss on the source room(s) and a domain-
+                       invariance loss over source + (unlabeled) target
+                       room, weighted by --lambda_dann (default 0.5).
 
 Both models are trained to classify GESTURE. We report, mean ± std over
 >= 3 seeds, for each model:
@@ -26,9 +33,10 @@ lever.
 Outputs (results/):
     b5_isolation_summary.csv     — model x {in-dom acc, cross-room acc,
                                    room-decodability-from-computed-features}
-    b5_confusion_OTA_linear.png  — cross-room gesture confusion matrix
-    b5_confusion_Digital_MLP.png
-    b5_confusion_*.npy           — raw confusion matrices
+                                   Rows are APPENDED with a `feature_mode`
+                                   column so runs on different features don't
+                                   overwrite each other.
+    b5_confusion_<model>_<feature>.png / .npy — cross-room gesture confusion
 
 HARD RULES honoured:
     - accepts --seed, prints the compute device, writes a timestamped log
@@ -36,7 +44,8 @@ HARD RULES honoured:
     - does not alter existing default behaviour or the BVP paths
 
 Usage:
-    python b5_isolation.py --features csi --balance-room --feature amp_phase --seed 42
+    python b5_isolation.py --features csi --balance-room --feature dfs_spec \
+        --models OTA_linear Digital_MLP Digital_DANN --seed 42
 """
 
 import argparse
@@ -95,15 +104,80 @@ class DigitalMLP(nn.Module):
         return self.out(self.penultimate(x))
 
 
+class _GradReverse(torch.autograd.Function):
+    """Gradient-reversal layer (Ganin & Lempitsky, 2015)."""
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = float(lambd)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None
+
+
+def grad_reverse(x, lambd):
+    return _GradReverse.apply(x, lambd)
+
+
+class DigitalDANN(nn.Module):
+    """Digital_MLP backbone + room-domain head fed through a GRL.
+
+    Same shared trunk as Digital_MLP so the computed features live in an
+    identically-sized penultimate space; only the training objective differs.
+    """
+
+    def __init__(self, in_dim, num_classes, num_domains,
+                 h1=MLP_H1, h2=MLP_H2, lambd=0.5):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, h1)
+        self.fc2 = nn.Linear(h1, h2)
+        self.out = nn.Linear(h2, num_classes)
+        self.domain_head = nn.Linear(h2, num_domains)
+        self.lambd = float(lambd)
+
+    def penultimate(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return x
+
+    def forward(self, x):
+        return self.out(self.penultimate(x))
+
+    def forward_with_domain(self, x):
+        z = self.penultimate(x)
+        y = self.out(z)
+        d = self.domain_head(grad_reverse(z, self.lambd))
+        return y, d
+
+
 # ─── Training / inference helpers ─────────────────────────────────────────────
 
-def _train_model(kind, in_dim, num_classes, X_tr, y_tr, device, seed):
-    """Train one model on standardized real features and return it."""
+def _train_model(kind, in_dim, num_classes, X_tr, y_tr, device, seed,
+                 d_tr=None, X_unlab=None, d_unlab=None,
+                 num_domains=None, lambda_dann=0.5):
+    """Train one model on standardized real features and return it.
+
+    For Digital_DANN, `d_tr` provides the source-domain labels (int), and
+    (`X_unlab`, `d_unlab`) optionally provides an unlabeled target-domain batch
+    used only by the domain head. Task loss is computed on X_tr only.
+    """
     torch.manual_seed(seed)
     if kind == "OTA_linear":
         model = ComplexLinear(in_dim, num_classes).to(device)
     elif kind == "Digital_MLP":
         model = DigitalMLP(in_dim, num_classes).to(device)
+    elif kind == "Digital_DANN":
+        if num_domains is None or num_domains < 2 or d_tr is None:
+            # Fall back to plain MLP training if there aren't at least 2
+            # observable domains — DANN needs contrast to be meaningful.
+            model = DigitalDANN(in_dim, num_classes,
+                                num_domains=max(int(num_domains or 1), 2),
+                                lambd=lambda_dann).to(device)
+        else:
+            model = DigitalDANN(in_dim, num_classes, num_domains=int(num_domains),
+                                lambd=lambda_dann).to(device)
     else:
         raise ValueError(kind)
 
@@ -111,17 +185,40 @@ def _train_model(kind, in_dim, num_classes, X_tr, y_tr, device, seed):
     loss_fn = nn.CrossEntropyLoss()
 
     xt = torch.tensor(X_tr, dtype=torch.float32, device=device)
+    yt = torch.tensor(y_tr, dtype=torch.long, device=device)
+
     if kind == "OTA_linear":
         # OTA forward expects a complex symbol vector; the CSI feature is the
         # real part, imaginary part = 0 (mirrors modulating x onto the channel).
-        xt = torch.complex(xt, torch.zeros_like(xt))
-    yt = torch.tensor(y_tr, dtype=torch.long, device=device)
+        xt_in = torch.complex(xt, torch.zeros_like(xt))
+    else:
+        xt_in = xt
+
+    dann_active = (kind == "Digital_DANN" and d_tr is not None
+                   and num_domains is not None and num_domains >= 2)
+    if dann_active:
+        dt = torch.tensor(d_tr, dtype=torch.long, device=device)
+        if X_unlab is not None and d_unlab is not None and len(X_unlab) > 0:
+            xu = torch.tensor(X_unlab, dtype=torch.float32, device=device)
+            du = torch.tensor(d_unlab, dtype=torch.long, device=device)
+            x_dom = torch.cat([xt_in, xu], dim=0)
+            d_dom = torch.cat([dt, du], dim=0)
+        else:
+            x_dom = xt_in
+            d_dom = dt
 
     model.train()
     for _ in range(TRAIN_EPOCHS):
         opt.zero_grad()
-        logits = model(xt)              # OTA: |y| magnitudes used as class logits
-        loss = loss_fn(logits, yt)
+        if dann_active:
+            logits = model(xt_in)
+            task_loss = loss_fn(logits, yt)
+            _, dom_logits = model.forward_with_domain(x_dom)
+            dom_loss = loss_fn(dom_logits, d_dom)
+            loss = task_loss + dom_loss   # GRL already scales by lambd
+        else:
+            logits = model(xt_in)
+            loss = loss_fn(logits, yt)
         loss.backward()
         opt.step()
     return model
@@ -206,7 +303,8 @@ def load_dataset(args, seed):
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
 
-def evaluate_model(kind, X, y_g, groups, y_room, seed, device):
+def evaluate_model(kind, X, y_g, groups, y_room, seed, device,
+                   lambda_dann=0.5):
     """Run in-domain CV and cross-room evaluation for one model/seed.
 
     Returns a dict with in-domain acc/f1, cross-room acc/f1, aggregated
@@ -215,6 +313,7 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device):
     """
     n, in_dim = X.shape
     num_classes = int(y_g.max()) + 1
+    num_domains = int(np.unique(y_room).size)
 
     # ── in-domain: grouped 5-fold over the pooled (both-room) data ──
     comp_feats = None
@@ -222,7 +321,16 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device):
     for tr, te in _grouped_splits(X, y_g, groups, seed):
         sc = StandardScaler().fit(X[tr])
         Xtr, Xte = sc.transform(X[tr]), sc.transform(X[te])
-        model = _train_model(kind, in_dim, num_classes, Xtr, y_g[tr], device, seed)
+        # For DANN in-domain: training fold already spans both rooms, so the
+        # invariance signal comes from the source's own domain labels. We do
+        # NOT peek at test features (that would be an unfair leak vs the plain
+        # MLP baseline).
+        d_tr = y_room[tr] if kind == "Digital_DANN" else None
+        model = _train_model(
+            kind, in_dim, num_classes, Xtr, y_g[tr], device, seed,
+            d_tr=d_tr, X_unlab=None, d_unlab=None,
+            num_domains=num_domains, lambda_dann=lambda_dann,
+        )
         preds, feats = _infer(kind, model, Xte, device)
         in_acc.append(accuracy_score(y_g[te], preds))
         in_f1.append(f1_score(y_g[te], preds, average="macro", zero_division=0))
@@ -242,7 +350,17 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device):
                 continue
             sc = StandardScaler().fit(X[tr])
             Xtr, Xte = sc.transform(X[tr]), sc.transform(X[te])
-            model = _train_model(kind, in_dim, num_classes, Xtr, y_g[tr], device, seed)
+            # For DANN cross-room: source = training room (single label), target
+            # = test room (unlabeled). Feed unlabeled test features to the
+            # domain head; task loss is still gesture CE on the source only.
+            d_tr = y_room[tr] if kind == "Digital_DANN" else None
+            X_unlab = Xte if kind == "Digital_DANN" else None
+            d_unlab = y_room[te] if kind == "Digital_DANN" else None
+            model = _train_model(
+                kind, in_dim, num_classes, Xtr, y_g[tr], device, seed,
+                d_tr=d_tr, X_unlab=X_unlab, d_unlab=d_unlab,
+                num_domains=num_domains, lambda_dann=lambda_dann,
+            )
             preds, _ = _infer(kind, model, Xte, device)
             cross_acc.append(accuracy_score(y_g[te], preds))
             cross_f1.append(f1_score(y_g[te], preds, average="macro", zero_division=0))
@@ -260,14 +378,15 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device):
     }
 
 
-def _save_confusion(kind, y_true, y_pred, num_classes):
+def _save_confusion(kind, feature_mode, y_true, y_pred, num_classes):
     if y_true.size == 0:
         return
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
-    np.save(RESULTS_DIR / f"b5_confusion_{kind}.npy", cm)
+    tag = f"{kind}_{feature_mode}"
+    np.save(RESULTS_DIR / f"b5_confusion_{tag}.npy", cm)
     fig, ax = plt.subplots(figsize=(5, 4.5))
     im = ax.imshow(cm, cmap="Blues")
-    ax.set_title(f"B5 cross-room gesture confusion — {kind}")
+    ax.set_title(f"B5 cross-room gesture confusion — {kind} [{feature_mode}]")
     ax.set_xlabel("predicted")
     ax.set_ylabel("true")
     ax.set_xticks(range(num_classes))
@@ -279,13 +398,16 @@ def _save_confusion(kind, y_true, y_pred, num_classes):
                     color="white" if cm[i, j] > thresh else "black", fontsize=9)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
-    out = RESULTS_DIR / f"b5_confusion_{kind}.png"
+    out = RESULTS_DIR / f"b5_confusion_{tag}.png"
     fig.savefig(out, dpi=150)
     plt.close()
     print(f"  [saved] {out}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
+ALL_MODELS = ["OTA_linear", "Digital_MLP", "Digital_DANN"]
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -301,6 +423,13 @@ def main():
     ap.add_argument("--dates", nargs="+", default=["20181109", "20181118"])
     ap.add_argument("--users", nargs="+", type=int, default=[2, 3])
     ap.add_argument("--gestures", nargs="+", type=int, default=[1, 2, 3, 5, 6])
+    ap.add_argument("--models", nargs="+", choices=ALL_MODELS,
+                    default=["OTA_linear", "Digital_MLP"],
+                    help="which models to evaluate (any subset of "
+                         "OTA_linear, Digital_MLP, Digital_DANN). Default keeps "
+                         "the original two so existing runs are unchanged.")
+    ap.add_argument("--lambda_dann", type=float, default=0.5,
+                    help="GRL scaling for Digital_DANN's domain-invariance loss")
     args = ap.parse_args()
 
     setup_logging("b5_isolation")
@@ -312,6 +441,7 @@ def main():
     print("B5 — Isolation experiment (computation is the only varying factor)")
     print(f"  features={args.features} feature={args.feature} "
           f"balance_room={args.balance_room} seeds={seeds}")
+    print(f"  models={args.models} lambda_dann={args.lambda_dann}")
     print("=" * 70)
 
     data = load_dataset(args, seed=args.seed)
@@ -338,7 +468,9 @@ def main():
         sys.exit(1)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    models = ["OTA_linear", "Digital_MLP"]
+    # Preserve user-requested order but drop dupes.
+    seen = set()
+    models = [m for m in args.models if not (m in seen or seen.add(m))]
     agg = {m: {"in_acc": [], "in_f1": [], "cross_acc": [], "cross_f1": []}
            for m in models}
     # collect cross-room predictions across seeds for the confusion matrices
@@ -351,7 +483,8 @@ def main():
     for seed in seeds:
         print(f"\n{'─' * 60}\n  SEED {seed}\n{'─' * 60}")
         for m in models:
-            res = evaluate_model(m, X, y_g, groups, y_room, seed, device)
+            res = evaluate_model(m, X, y_g, groups, y_room, seed, device,
+                                 lambda_dann=args.lambda_dann)
             agg[m]["in_acc"].append(res["in_acc"])
             agg[m]["in_f1"].append(res["in_f1"])
             agg[m]["cross_acc"].append(res["cross_acc"])
@@ -380,7 +513,7 @@ def main():
             if any(a.size for a in conf[m]["true"]) else np.array([])
         yp = np.concatenate([a for a in conf[m]["pred"] if a.size]) \
             if any(a.size for a in conf[m]["pred"]) else np.array([])
-        _save_confusion(m, yt, yp, num_classes)
+        _save_confusion(m, args.feature, yt, yp, num_classes)
 
     # ── summary table ──
     def ms(v):
@@ -389,28 +522,39 @@ def main():
 
     print(f"\n{'=' * 70}")
     print(f"  B5 ISOLATION SUMMARY  (mean±std over seeds {seeds})")
-    print(f"  room chance level = {chance_room*100:.1f}%")
+    print(f"  feature_mode = {args.feature}  |  room chance level = {chance_room*100:.1f}%")
     print(f"{'=' * 70}")
-    header = (f"  {'model':<13} {'in-dom acc':<14} {'in-dom F1':<14} "
+    header = (f"  {'model':<15} {'in-dom acc':<14} {'in-dom F1':<14} "
               f"{'cross acc':<14} {'cross F1':<14} {'room-decod':<12}")
     print(header)
     print("  " + "─" * (len(header) - 2))
 
-    csv_lines = ["model,in_dom_acc,in_dom_f1,cross_room_acc,cross_room_f1,"
-                 "room_decodability,loc_decodability,user_decodability,room_chance"]
+    header_cols = ("feature_mode,model,in_dom_acc,in_dom_f1,cross_room_acc,"
+                   "cross_room_f1,room_decodability,loc_decodability,"
+                   "user_decodability,room_chance,lambda_dann")
+    rows_out = []
     for m in models:
         in_acc, in_f1 = ms(agg[m]["in_acc"]), ms(agg[m]["in_f1"])
         cr_acc, cr_f1 = ms(agg[m]["cross_acc"]), ms(agg[m]["cross_f1"])
         rd = ms(room_dec[m])
         ld, ud = ms(loc_dec[m]), ms(user_dec[m])
-        print(f"  {m:<13} {in_acc:<14} {in_f1:<14} {cr_acc:<14} {cr_f1:<14} {rd:<12}")
-        csv_lines.append(
-            f"{m},{in_acc},{in_f1},{cr_acc},{cr_f1},{rd},{ld},{ud},"
-            f"{chance_room*100:.1f}")
+        print(f"  {m:<15} {in_acc:<14} {in_f1:<14} {cr_acc:<14} {cr_f1:<14} {rd:<12}")
+        lam = f"{args.lambda_dann}" if m == "Digital_DANN" else ""
+        rows_out.append(
+            f"{args.feature},{m},{in_acc},{in_f1},{cr_acc},{cr_f1},"
+            f"{rd},{ld},{ud},{chance_room*100:.1f},{lam}"
+        )
 
+    # Append rows (with a `feature_mode` column) instead of overwriting, so
+    # runs on different features don't clobber each other.
     summary_path = RESULTS_DIR / "b5_isolation_summary.csv"
-    summary_path.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
-    print(f"\n  [saved] {summary_path}")
+    file_exists = summary_path.exists() and summary_path.stat().st_size > 0
+    with open(summary_path, "a", encoding="utf-8") as fh:
+        if not file_exists:
+            fh.write(header_cols + "\n")
+        for r in rows_out:
+            fh.write(r + "\n")
+    print(f"\n  [{'appended' if file_exists else 'saved'}] {summary_path}")
     print("\n[done] B5 isolation complete.")
 
 

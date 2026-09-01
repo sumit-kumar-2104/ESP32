@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data.csi_loader import build_csi_features, balance_by_room, FEATURE_MODES
+from data.csi_loader import build_csi_features, balance_by_room, FEATURE_MODES, feature_dim
 from config import setup_logging, print_device, set_seed
 
 
@@ -57,6 +57,8 @@ def main():
     print(f"[csi-dump] root={csi_root}")
     print(f"[csi-dump] dates={args.dates} users={args.users} gestures={args.gestures}")
     print(f"[csi-dump] feature={args.feature} balance_room={args.balance_room}")
+    per_rx, feat_dim = feature_dim(args.feature)
+    print(f"[csi-dump] feature dim = {feat_dim}  (per_rx={per_rx}, receivers={6})")
 
     data = build_csi_features(
         csi_root, args.dates,

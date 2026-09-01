@@ -29,6 +29,20 @@ Selectable via the `feature` argument (default "amp" = original behaviour):
             time frames, first DFS_BINS (=16) low-frequency bins kept   -> 16
         -> 6 * (60 + 16) = 456
 
+    dfs_spec (1536-dim, TEMPORAL AXIS PRESERVED):
+        Doppler-frequency spectrogram per receiver — the temporal micro-
+        Doppler signature that motion actually leaves on the channel. For
+        each receiver:
+            amp = |CSI| averaged over antenna pairs                 -> (T, 30)
+            DC-detrend along time, then STFT along the packet/time
+              axis PER subcarrier, magnitude, averaged over subcarriers
+              -> (F, frames)
+            keep the first DFS_SPEC_BINS (=16) low-Doppler bins    -> (16, frames)
+            resample the time axis to a fixed DFS_SPEC_FRAMES (=16) length
+              via linear interpolation (pad-then-interp when short)
+              -> (16, 16), flattened row-major -> 256 per receiver
+        -> 6 * (16 * 16) = 1536, time axis NOT collapsed.
+
 Receivers are concatenated in fixed order r1..r6 (missing receiver = zeros).
 
 The subcarrier axis is kept because the room signature is per-frequency (the
@@ -52,7 +66,12 @@ PHASE_PER_RX = 2 * N_SUB           # mean_t + std_t of sanitized phase     -> 60
 DFS_BINS = 16                      # low-freq Doppler bins kept per receiver
 DFS_NPERSEG = 64                   # STFT window length (packets)
 
-FEATURE_MODES = ("amp", "amp_phase", "amp_dfs")
+# dfs_spec geometry — Doppler-frequency spectrogram with time preserved.
+DFS_SPEC_BINS = 16                  # low-Doppler bins kept per receiver
+DFS_SPEC_FRAMES = 16                # fixed number of STFT time frames
+DFS_SPEC_PER_RX = DFS_SPEC_BINS * DFS_SPEC_FRAMES   # 256 per receiver
+
+FEATURE_MODES = ("amp", "amp_phase", "amp_dfs", "dfs_spec")
 
 # Back-compat defaults (amp mode).
 FEAT_PER_RX = AMP_PER_RX                 # 60
@@ -64,6 +83,8 @@ def feature_dim(feature: str = "amp"):
     if feature not in FEATURE_MODES:
         raise ValueError(
             f"unknown feature mode {feature!r}; choose from {FEATURE_MODES}")
+    if feature == "dfs_spec":
+        return DFS_SPEC_PER_RX, DFS_SPEC_PER_RX * N_RX_FILES
     per = AMP_PER_RX
     if feature == "amp_phase":
         per += PHASE_PER_RX
@@ -151,11 +172,48 @@ def _dfs_block(csi):
     return band
 
 
+def _dfs_spec_block(csi):
+    """Doppler-frequency spectrogram, temporal structure preserved.
+
+    STFT along the packet/time axis of the antenna-averaged amplitude (DC
+    removed), magnitude averaged over subcarriers, keeping the first
+    DFS_SPEC_BINS low-Doppler bins and linearly resampling the STFT time axis
+    to DFS_SPEC_FRAMES. Output shape (DFS_SPEC_BINS, DFS_SPEC_FRAMES), row-
+    major-flattened. Missing/short recordings zero-padded.
+    """
+    from scipy.signal import stft
+    out = np.zeros((DFS_SPEC_BINS, DFS_SPEC_FRAMES), dtype=np.float32)
+    amp = np.abs(csi).mean(axis=(2, 3))          # (T, 30)
+    amp = amp - amp.mean(axis=0, keepdims=True)  # remove static/DC channel
+    T = amp.shape[0]
+    nper = min(DFS_NPERSEG, T)
+    if nper < 4:
+        return out.reshape(-1)
+    _, _, Z = stft(amp, nperseg=nper, axis=0)    # (F, 30, frames)
+    spec = np.abs(Z).mean(axis=1)                # (F, frames) subcarrier-avg
+    k = min(DFS_SPEC_BINS, spec.shape[0])
+    band = spec[:k, :]                            # (k, frames)
+    n_fr = band.shape[1]
+    if n_fr < 1:
+        return out.reshape(-1)
+    if n_fr == 1:
+        # single frame — broadcast to fixed length
+        out[:k, :] = band[:, :1]
+        return out.reshape(-1)
+    x_src = np.linspace(0.0, 1.0, n_fr)
+    x_tgt = np.linspace(0.0, 1.0, DFS_SPEC_FRAMES)
+    for b in range(k):
+        out[b, :] = np.interp(x_tgt, x_src, band[b, :]).astype(np.float32)
+    return out.reshape(-1)
+
+
 def _receiver_feature(dat_path, feature="amp"):
     """Return the per-receiver feature vector for one .dat, or None."""
     csi = _load_receiver_csi(dat_path)
     if csi is None:
         return None
+    if feature == "dfs_spec":
+        return _dfs_spec_block(csi).astype(np.float32)
     blocks = [_amp_block(csi)]
     if feature == "amp_phase":
         blocks.append(_phase_block(csi))
@@ -175,7 +233,8 @@ def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
         keep_users:    optional set of user ids (ints) to keep
         keep_gestures: optional set of gesture ids (ints) to keep
         feature:       feature mode, one of FEATURE_MODES
-                       ("amp" [default, 360], "amp_phase" [720], "amp_dfs" [456])
+                       ("amp" [default, 360], "amp_phase" [720],
+                        "amp_dfs" [456], "dfs_spec" [1536, time preserved])
 
     Returns a dict of numpy arrays matching the b2 dump schema:
         X, y_room, y_location, y_orientation, y_user, y_gesture, groups
