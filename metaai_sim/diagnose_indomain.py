@@ -62,7 +62,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import setup_logging, print_device, set_seed, get_data_dir
 
 
-VALID_FEATURES = ("dfs_full", "dfs_small", "bvp", "csi")
+VALID_FEATURES = ("dfs_full", "dfs_small", "bvp", "csi", "raw_csi")
 
 
 # ─── Data loaders (one per feature family) ────────────────────────────────────
@@ -161,12 +161,13 @@ def _load_bvp(dates):
 def _load_csi(feature, dfs_bins, dates, users, gestures):
     """Return (X, y, meta) for a CSI feature mode."""
     from data.csi_loader import build_csi_features
-    csi_root = get_data_dir() / "widar3" / "CSI"
-    if not csi_root.exists():
-        print(f"\n[FATAL] Raw CSI directory not found at {csi_root}")
-        print(f"        Set METAAI_DATA_DIR or place the Widar3.0 CSI tree there.")
-        print(f"        See README_raw_csi.md for the expected layout.")
-        sys.exit(1)
+    from config import get_raw_csi_dir, require_raw_csi_dir
+    csi_root = get_raw_csi_dir()
+    if not csi_root.exists() or not any(csi_root.iterdir()):
+        # For the raw_csi feature the user explicitly asked for raw CSI —
+        # print the definitive fix message and stop. Same message for the
+        # DFS features so behaviour is consistent.
+        require_raw_csi_dir()
     data = build_csi_features(
         csi_root, dates,
         keep_users=set(users) if users else None,
@@ -175,10 +176,6 @@ def _load_csi(feature, dfs_bins, dates, users, gestures):
     )
     X = np.asarray(data["X"], dtype=np.float32)
     y = np.asarray(data["y_gesture"], dtype=np.int64)
-    # Reconstruct per-sample date from groups (group id encodes date).
-    # csi_loader builds groups from "uid-loc-ori-room-date"; we didn't keep
-    # per-sample date directly, so approximate by picking the FIRST date if
-    # only one is present, else warn.
     used_dates = list(dates)
     meta = {
         "date": np.array([used_dates[0]] * len(X)) if len(used_dates) == 1
@@ -208,6 +205,12 @@ def load_features(args):
         dates = args.dates if args.dates else ["20181109"]
         X, y, meta = _load_csi("dfs_spec", "small", dates, args.users, args.gestures)
         return X, y, meta, f"CSI dfs_spec SMALL (150-dim); dates={dates}"
+    if args.features == "raw_csi":
+        dates = args.dates if args.dates else ["20181109"]
+        X, y, meta = _load_csi("raw", "full", dates, args.users, args.gestures)
+        return X, y, meta, (f"CSI raw (subcarrier-resolved amplitude, "
+                            f"time-resampled to 32 frames, 6 receivers -> "
+                            f"5760-dim); dates={dates}")
     raise ValueError(args.features)
 
 

@@ -78,6 +78,26 @@ Expected output near the top:
 [csi-dump] feature dim = 150  (per_rx=25, receivers=6)
 ```
 
+## Raw-CSI probe ceiling (Phase-0 addendum)
+
+`data/csi_loader.py` also exposes `--feature raw`: subcarrier-resolved
+amplitude (30 subcarriers) with the time axis linearly resampled to a fixed
+`RAW_T_FRAMES = 32` frames per receiver, flattened. Six receivers ->
+`30 * 32 * 6 = 5760` dim per sample. No STFT, no Doppler collapse, no
+mean/std reduction — the closest to raw CSI we can hand a fixed-size
+learner.
+
+Use it via the Phase-0 diagnostic to measure the raw-CSI probe ceiling
+directly (the target is ~80%+ from the earlier BVP pipeline):
+
+```bash
+python diagnose_indomain.py --features raw_csi --dates 20181109
+```
+
+The report saves to `logs/diag_raw_csi_<timestamp>.log` and compares the
+sklearn LogReg + MLP probe accuracies against the DFS ~63% ceiling from
+Phase 0.
+
 ## Gesture-id caveat (see `gesture_map.py`)
 
 The numeric `gesture` field in the filename does **not** name the same

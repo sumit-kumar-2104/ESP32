@@ -80,7 +80,15 @@ DFS_SPEC_PER_RX_SMALL = DFS_SPEC_BINS_SMALL * DFS_SPEC_FRAMES_SMALL   # 25/rx ->
 
 DFS_BINS_MODES = ("full", "small")
 
-FEATURE_MODES = ("amp", "amp_phase", "amp_dfs", "dfs_spec")
+# `raw` mode — subcarrier-resolved amplitude with the time axis LINEARLY
+# RESAMPLED to a fixed number of frames (no STFT, no mean/std collapse). This
+# is the "closest to raw CSI" per-sample feature we can build while still
+# handing the model a fixed-size vector. Used by the Phase-0 diagnostic to
+# measure the raw-CSI probe ceiling relative to the DFS ~63% ceiling.
+RAW_T_FRAMES = 32                    # fixed number of time frames after resample
+RAW_PER_RX = N_SUB * RAW_T_FRAMES     # 30 * 32 = 960 per receiver
+
+FEATURE_MODES = ("amp", "amp_phase", "amp_dfs", "dfs_spec", "raw")
 
 
 def _dfs_spec_geometry(dfs_bins: str = "full"):
@@ -108,6 +116,8 @@ def feature_dim(feature: str = "amp", dfs_bins: str = "full"):
     if feature == "dfs_spec":
         _, _, per_rx = _dfs_spec_geometry(dfs_bins)
         return per_rx, per_rx * N_RX_FILES
+    if feature == "raw":
+        return RAW_PER_RX, RAW_PER_RX * N_RX_FILES
     per = AMP_PER_RX
     if feature == "amp_phase":
         per += PHASE_PER_RX
@@ -234,6 +244,30 @@ def _dfs_spec_block(csi, dfs_bins: str = "full"):
     return out.reshape(-1)
 
 
+def _raw_block(csi):
+    """Subcarrier-resolved amplitude on a fixed-length time axis -> (N_SUB*RAW_T_FRAMES,).
+
+    No STFT, no Doppler, no mean/std collapse: amplitude of the antenna-averaged
+    CSI is linearly resampled along packets to `RAW_T_FRAMES` frames and
+    flattened (subcarrier-major). This is the closest we get to raw CSI while
+    keeping a fixed-size per-sample feature vector — the Phase-0 diagnostic
+    uses it to measure the raw-CSI probe ceiling vs the DFS ~63% ceiling.
+    """
+    amp = np.abs(csi).mean(axis=(2, 3))          # (T, 30)
+    T = amp.shape[0]
+    out = np.zeros((RAW_T_FRAMES, N_SUB), dtype=np.float32)
+    if T < 1:
+        return out.reshape(-1)
+    if T == 1:
+        out[:, :] = amp[0:1, :]
+        return out.reshape(-1)
+    x_src = np.linspace(0.0, 1.0, T)
+    x_tgt = np.linspace(0.0, 1.0, RAW_T_FRAMES)
+    for s in range(N_SUB):
+        out[:, s] = np.interp(x_tgt, x_src, amp[:, s]).astype(np.float32)
+    return out.reshape(-1)   # (RAW_T_FRAMES * N_SUB,) — time-major, subcarrier-minor
+
+
 def _receiver_feature(dat_path, feature="amp", dfs_bins="full"):
     """Return the per-receiver feature vector for one .dat, or None."""
     csi = _load_receiver_csi(dat_path)
@@ -241,6 +275,8 @@ def _receiver_feature(dat_path, feature="amp", dfs_bins="full"):
         return None
     if feature == "dfs_spec":
         return _dfs_spec_block(csi, dfs_bins=dfs_bins).astype(np.float32)
+    if feature == "raw":
+        return _raw_block(csi).astype(np.float32)
     blocks = [_amp_block(csi)]
     if feature == "amp_phase":
         blocks.append(_phase_block(csi))
