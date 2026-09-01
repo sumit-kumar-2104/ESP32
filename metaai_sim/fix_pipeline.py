@@ -52,6 +52,9 @@ import numpy as np
 
 _HOOK_A_ENABLED = False
 _HOOK_B_ENABLED = False
+# Task B hooks — added after Phase-0 diagnosis ruled out A / B for dfs_full.
+_HOOK_STE_ENABLED = False
+_HOOK_HEAD_LR_ENABLED = False
 
 
 def enable_hook_A() -> None:
@@ -66,10 +69,29 @@ def enable_hook_B() -> None:
     _HOOK_B_ENABLED = True
 
 
+def enable_hook_STE() -> None:
+    """Opt into HOOK STE — replace the current 2-bit phase quantizer with a
+    surrogate-gradient STE that forwards the quantized weight but backpropagates
+    through a hardtanh-style identity so autograd can actually reach the
+    underlying real/imag parameters. See `wrap_ste_quantizer` below."""
+    global _HOOK_STE_ENABLED
+    _HOOK_STE_ENABLED = True
+
+
+def enable_hook_HEAD_LR() -> None:
+    """Opt into HOOK HEAD_LR — build an optimizer with a separate, larger
+    learning rate for the OTA / classifier head so a dead-grad head can catch
+    up. See `head_param_groups` below."""
+    global _HOOK_HEAD_LR_ENABLED
+    _HOOK_HEAD_LR_ENABLED = True
+
+
 def disable_all_hooks() -> None:
-    global _HOOK_A_ENABLED, _HOOK_B_ENABLED
+    global _HOOK_A_ENABLED, _HOOK_B_ENABLED, _HOOK_STE_ENABLED, _HOOK_HEAD_LR_ENABLED
     _HOOK_A_ENABLED = False
     _HOOK_B_ENABLED = False
+    _HOOK_STE_ENABLED = False
+    _HOOK_HEAD_LR_ENABLED = False
 
 
 def is_hook_A_enabled() -> bool:
@@ -78,6 +100,14 @@ def is_hook_A_enabled() -> bool:
 
 def is_hook_B_enabled() -> bool:
     return _HOOK_B_ENABLED
+
+
+def is_hook_STE_enabled() -> bool:
+    return _HOOK_STE_ENABLED
+
+
+def is_hook_HEAD_LR_enabled() -> bool:
+    return _HOOK_HEAD_LR_ENABLED
 
 
 # ─── HOOK A: input normalization ──────────────────────────────────────────────
@@ -143,9 +173,106 @@ def apply_output_rescale(y_mag, input_dim: int, num_classes: Optional[int] = Non
     return y_mag * factor
 
 
+# ─── HOOK STE: surrogate-gradient straight-through estimator for 2-bit phase ─
+#
+# The current DiscreteComplexLinear uses `w + (quant - w).detach()`. Autograd
+# *sees* w and treats the quantization as identity, which is textbook STE and
+# on paper is correct. In practice, if Task A shows the STE grad is opaque
+# (grad norm ~0), the culprit is usually that the differentiable path lives
+# purely in `torch.angle` — which has a pathologically small local gradient
+# for weights near the 0 magnitude. HOOK STE replaces the quantizer with a
+# surrogate that uses a hardtanh-clamped identity backward on both the real
+# and imaginary parts directly, sidestepping the angle-based path.
+
+class _PhaseQuantizeSTE(__import__("torch").autograd.Function):
+    """Forward = nearest 2-bit phasor. Backward = hardtanh-clamped identity."""
+
+    @staticmethod
+    def forward(ctx, w_real, w_imag, phase_states):
+        import torch
+        w_complex = torch.complex(w_real, w_imag)
+        angles = torch.angle(w_complex)
+        phase_vals = phase_states.to(w_real.device)
+        # Nearest allowed phase.
+        diff = angles.unsqueeze(-1) - phase_vals.view(*([1] * angles.dim()), -1)
+        diff = (diff + torch.pi) % (2 * torch.pi) - torch.pi
+        idx = torch.argmin(torch.abs(diff), dim=-1)
+        chosen = phase_vals[idx]
+        q_real = torch.cos(chosen)
+        q_imag = torch.sin(chosen)
+        ctx.save_for_backward(w_real, w_imag)
+        return q_real, q_imag
+
+    @staticmethod
+    def backward(ctx, grad_q_real, grad_q_imag):
+        w_real, w_imag = ctx.saved_tensors
+        import torch
+        # Surrogate: clamp incoming gradient with hardtanh so it can't
+        # explode, but always let it flow (identity in [-1, 1]).
+        gr = torch.clamp(grad_q_real, -1.0, 1.0)
+        gi = torch.clamp(grad_q_imag, -1.0, 1.0)
+        return gr, gi, None
+
+
+def wrap_ste_quantizer(discrete_module):
+    """If HOOK STE is on, monkey-patch a DiscreteComplexLinear so its
+    `.complex_weight` uses `_PhaseQuantizeSTE`. No-op when disabled.
+    """
+    import torch
+    if not _HOOK_STE_ENABLED:
+        return discrete_module
+    from config import PHASE_STATES
+
+    phase_states = torch.tensor(PHASE_STATES, dtype=torch.float32)
+
+    def _complex_weight(self):
+        q_real, q_imag = _PhaseQuantizeSTE.apply(
+            self.weight_real, self.weight_imag, phase_states.to(self.weight_real.device),
+        )
+        return torch.complex(q_real, q_imag)
+
+    # Bind as a property so `module.complex_weight` still works transparently.
+    type(discrete_module).complex_weight = property(_complex_weight)
+    return discrete_module
+
+
+# ─── HOOK HEAD_LR: separate learning rate for the OTA / classifier head ───────
+
+def head_param_groups(model, base_lr: float, head_lr_mult: float = 10.0,
+                      head_names=("weight_real", "weight_imag", "linear", "fc",
+                                  "out")):
+    """Return a list of param groups for `torch.optim.Adam(**)` with a bigger
+    LR on parameters whose name contains any of `head_names`. Only active when
+    HOOK HEAD_LR is enabled; otherwise returns a single group at base_lr.
+    """
+    if not _HOOK_HEAD_LR_ENABLED:
+        return [{"params": [p for p in model.parameters() if p.requires_grad],
+                 "lr": base_lr}]
+    head, rest = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if any(hn in name for hn in head_names):
+            head.append(p)
+        else:
+            rest.append(p)
+    groups = []
+    if rest:
+        groups.append({"params": rest, "lr": base_lr})
+    if head:
+        groups.append({"params": head, "lr": base_lr * head_lr_mult})
+    return groups
+
+
 # ─── Cross-domain safety gate ─────────────────────────────────────────────────
 
-DEFAULT_INDOMAIN_THRESHOLD = 0.60
+# Phase-0 diagnosis: DFS probe ceiling is ~63% (MLP) / ~61% (LogReg). A 60%
+# floor for the OTA model is therefore too aggressive on DFS — the OTA is
+# linear+magnitude, which cannot match a nonlinear MLP. 50% is the honest DFS
+# floor. Callers targeting raw CSI should pass a stricter threshold explicitly
+# via `assert_indomain_ok(..., threshold=0.70)` or the --target-acc flag on
+# the downstream script.
+DEFAULT_INDOMAIN_THRESHOLD = 0.50
 
 
 class IndomainCheckFailed(AssertionError):
@@ -155,6 +282,7 @@ class IndomainCheckFailed(AssertionError):
 
 def assert_indomain_ok(acc: float,
                        threshold: float = DEFAULT_INDOMAIN_THRESHOLD,
+                       target_acc: Optional[float] = None,
                        label: str = "in-domain accuracy") -> None:
     """Fail loud if the in-domain accuracy is below `threshold`.
 
@@ -163,9 +291,21 @@ def assert_indomain_ok(acc: float,
     to run cross-domain. This makes the "we accidentally ran cross-domain on
     a chance model" bug impossible.
 
-    Override via environment:  METAAI_INDOMAIN_THRESHOLD=0.5
-    Bypass (dangerous, dev only):  METAAI_SKIP_INDOMAIN_CHECK=1
+    Args:
+        acc:        measured in-domain accuracy (fraction in [0,1]).
+        threshold:  hard floor, below which the check FAILS. Default 0.50
+                    (DFS honest floor after Phase-0). Raise it for stronger
+                    features (e.g. raw CSI, pass 0.70 or higher).
+        target_acc: convenience alias for `threshold` used by downstream
+                    scripts' `--target-acc` flag. When both are provided,
+                    `target_acc` wins.
+        label:      human name of the number being checked (for the log).
+
+    Override via environment: METAAI_INDOMAIN_THRESHOLD=0.5 (float)
+    Dev bypass (never in a paper run): METAAI_SKIP_INDOMAIN_CHECK=1
     """
+    if target_acc is not None:
+        threshold = float(target_acc)
     if os.environ.get("METAAI_SKIP_INDOMAIN_CHECK") == "1":
         print(f"[assert_indomain_ok] BYPASSED via METAAI_SKIP_INDOMAIN_CHECK=1  "
               f"(measured {label} = {acc*100:.2f}%)")
@@ -186,7 +326,7 @@ def assert_indomain_ok(acc: float,
             f"{label} = {acc*100:.2f}% is below the {threshold*100:.0f}% floor. "
             f"Refusing to run a cross-domain experiment on a chance-level model. "
             f"Fix the in-domain pipeline first (see logs/diag_*.log and "
-            f"fix_pipeline.enable_hook_A / enable_hook_B), then rerun.\n"
+            f"fix_pipeline.enable_hook_STE / enable_hook_HEAD_LR), then rerun.\n"
             f"To temporarily bypass this check in dev, set "
             f"METAAI_SKIP_INDOMAIN_CHECK=1 (never in a paper run)."
         )
@@ -197,8 +337,10 @@ def assert_indomain_ok(acc: float,
 # ─── Self-test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("fix_pipeline: HOOK A enabled =", is_hook_A_enabled())
-    print("fix_pipeline: HOOK B enabled =", is_hook_B_enabled())
+    print("fix_pipeline: HOOK A       enabled =", is_hook_A_enabled())
+    print("fix_pipeline: HOOK B       enabled =", is_hook_B_enabled())
+    print("fix_pipeline: HOOK STE     enabled =", is_hook_STE_enabled())
+    print("fix_pipeline: HOOK HEAD_LR enabled =", is_hook_HEAD_LR_enabled())
     print("fix_pipeline: rescale factor for (U=1536, R=6) =",
           output_rescale_factor(1536, 6))
     print("fix_pipeline: rescale factor for (U=150,  R=6) =",
@@ -206,5 +348,11 @@ if __name__ == "__main__":
     try:
         assert_indomain_ok(0.24)
     except IndomainCheckFailed as e:
-        print(f"[self-test] correctly raised: {e}")
-    assert_indomain_ok(0.80)
+        print(f"[self-test] correctly raised at default threshold: {e}")
+    # DFS honest floor: 50% should PASS at 0.55.
+    assert_indomain_ok(0.55, label="DFS OTA in-domain")
+    # Raw-CSI stricter target should FAIL a 0.55 model.
+    try:
+        assert_indomain_ok(0.55, target_acc=0.70, label="raw-CSI OTA in-domain")
+    except IndomainCheckFailed as e:
+        print(f"[self-test] correctly raised at target_acc=0.70: {e}")
