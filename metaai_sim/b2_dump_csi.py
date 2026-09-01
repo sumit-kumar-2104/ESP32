@@ -20,7 +20,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data.csi_loader import build_csi_features, balance_by_room, FEATURE_MODES, feature_dim
+from data.csi_loader import (
+    build_csi_features,
+    balance_by_room,
+    FEATURE_MODES,
+    DFS_BINS_MODES,
+    feature_dim,
+)
 from config import setup_logging, print_device, set_seed
 
 
@@ -39,6 +45,11 @@ def main():
                     help="gesture ids to keep (empty = all)")
     ap.add_argument("--feature", choices=FEATURE_MODES, default="amp",
                     help="CSI feature mode (default amp = original behaviour)")
+    ap.add_argument("--dfs-bins", choices=DFS_BINS_MODES, default="full",
+                    dest="dfs_bins",
+                    help="dfs_spec size regime: full (default, 1536-dim) or "
+                         "small (~150-dim compact low-Doppler band). Only "
+                         "affects --feature dfs_spec; ignored otherwise.")
     ap.add_argument("--balance-room", action="store_true",
                     help="subsample the majority room to match the minority "
                          "room count (whole recordings only), so chance ~50%%")
@@ -56,8 +67,9 @@ def main():
 
     print(f"[csi-dump] root={csi_root}")
     print(f"[csi-dump] dates={args.dates} users={args.users} gestures={args.gestures}")
-    print(f"[csi-dump] feature={args.feature} balance_room={args.balance_room}")
-    per_rx, feat_dim = feature_dim(args.feature)
+    print(f"[csi-dump] feature={args.feature} dfs_bins={args.dfs_bins} "
+          f"balance_room={args.balance_room}")
+    per_rx, feat_dim = feature_dim(args.feature, dfs_bins=args.dfs_bins)
     print(f"[csi-dump] feature dim = {feat_dim}  (per_rx={per_rx}, receivers={6})")
 
     data = build_csi_features(
@@ -65,12 +77,15 @@ def main():
         keep_users=set(args.users) if args.users else None,
         keep_gestures=set(args.gestures) if args.gestures else None,
         feature=args.feature,
+        dfs_bins=args.dfs_bins,
     )
     data = dict(data)
     if args.balance_room:
         data = balance_by_room(data, seed=args.seed)
-    # Record which mode / balancing built this dump.
+    # Record which mode / dfs_bins / balancing built this dump so downstream
+    # scripts can detect a mismatch and rebuild instead of silently reusing.
     data["feature_mode"] = np.array(args.feature)
+    data["dfs_bins"] = np.array(args.dfs_bins)
     data["balanced"] = np.array(bool(args.balance_room))
 
     np.savez(out, **data)

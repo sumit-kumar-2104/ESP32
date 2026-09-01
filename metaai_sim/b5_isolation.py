@@ -5,18 +5,28 @@ environment-specific collapse?
 On the SAME balanced cross-room CSI dump and the SAME grouped cross-room split,
 we vary ONLY the computation used to turn features into a gesture decision:
 
-    (a) OTA_linear   — a complex linear layer followed by a magnitude |.|
-                       readout, argmax over class scores. This mirrors the
-                       MetaAI over-the-air forward pass (paper Eqn. 3:
-                       y_r = |Σ H·x|).
-    (b) Digital_MLP  — a small real-valued MLP (Linear-ReLU-Linear-ReLU-
-                       Linear) on the exact same standardized input.
-    (c) Digital_DANN — same MLP backbone as Digital_MLP, plus a room-domain
-                       classifier head fed through a gradient-reversal layer
-                       (Ganin & Lempitsky 2015). Trained jointly with the
-                       gesture CE loss on the source room(s) and a domain-
-                       invariance loss over source + (unlabeled) target
-                       room, weighted by --lambda_dann (default 0.5).
+    (a) OTA_linear    — a complex linear layer followed by a magnitude |.|
+                        readout, argmax over class scores. This mirrors the
+                        MetaAI over-the-air forward pass (paper Eqn. 3:
+                        y_r = |Σ H·x|).
+    (b) Digital_LinMag — a NOISE-FREE OTA twin: one real-valued linear layer
+                        W x (no bias), then a magnitude |.| readout, argmax
+                        over class scores. Identical readout structure to
+                        OTA_linear but trained with standard real-valued
+                        backprop and NO channel noise / NO OTA constraints.
+                        Isolates whether OTA_linear's failure to fit in-
+                        domain is driven by the linear+magnitude paradigm
+                        (expressivity) or by the wireless channel.
+    (c) Digital_MLP   — a small real-valued MLP (Linear-ReLU-Linear-ReLU-
+                        Linear) on the exact same standardized input.
+    (d) Digital_DANN  — same MLP backbone as Digital_MLP, plus a room-domain
+                        classifier head fed through a gradient-reversal layer
+                        (Ganin & Lempitsky 2015). Trained jointly with the
+                        gesture CE loss on the source room(s) and a domain-
+                        invariance loss over source + (unlabeled) target
+                        room, weighted by --lambda_dann (default 0.3) with a
+                        linear warmup ramp over the first N epochs
+                        (--lambda_dann_warmup_epochs, default 50).
 
 Both models are trained to classify GESTURE. We report, mean ± std over
 >= 3 seeds, for each model:
@@ -45,7 +55,9 @@ HARD RULES honoured:
 
 Usage:
     python b5_isolation.py --features csi --balance-room --feature dfs_spec \
-        --models OTA_linear Digital_MLP Digital_DANN --seed 42
+        --dfs-bins small \
+        --models OTA_linear Digital_LinMag Digital_MLP Digital_DANN \
+        --lambda_dann 0.3 --seed 42
 """
 
 import argparse
@@ -68,7 +80,12 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import setup_logging, print_device, set_seed
-from data.csi_loader import build_csi_features, balance_by_room, FEATURE_MODES
+from data.csi_loader import (
+    build_csi_features,
+    balance_by_room,
+    FEATURE_MODES,
+    DFS_BINS_MODES,
+)
 from models.linear_complex import ComplexLinear
 # Reuse the EXISTING domain probe so the computed features are evaluated with
 # the same methodology as b2.
@@ -102,6 +119,26 @@ class DigitalMLP(nn.Module):
 
     def forward(self, x):
         return self.out(self.penultimate(x))
+
+
+class DigitalLinMag(nn.Module):
+    """Noise-free OTA twin: one real-valued linear layer (no bias) then |.|.
+
+    Computation:  scores_r = | (W x)_r | ; argmax_r scores_r.
+
+    Same magnitude readout as OTA_linear, but with a real weight matrix and
+    NO channel noise / NO OTA constraints — trained by standard backprop.
+    This isolates whether OTA_linear's failure to fit in-domain is driven by
+    the linear+magnitude paradigm itself (expressivity) or by the wireless
+    channel model.
+    """
+
+    def __init__(self, in_dim, num_classes):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, num_classes, bias=False)
+
+    def forward(self, x):
+        return self.linear(x).abs()
 
 
 class _GradReverse(torch.autograd.Function):
@@ -156,16 +193,23 @@ class DigitalDANN(nn.Module):
 
 def _train_model(kind, in_dim, num_classes, X_tr, y_tr, device, seed,
                  d_tr=None, X_unlab=None, d_unlab=None,
-                 num_domains=None, lambda_dann=0.5):
+                 num_domains=None, lambda_dann=0.5,
+                 lambda_dann_warmup_epochs=0):
     """Train one model on standardized real features and return it.
 
     For Digital_DANN, `d_tr` provides the source-domain labels (int), and
     (`X_unlab`, `d_unlab`) optionally provides an unlabeled target-domain batch
-    used only by the domain head. Task loss is computed on X_tr only.
+    used only by the domain head. Task loss is computed on X_tr only. If
+    `lambda_dann_warmup_epochs > 0`, the GRL scaling is linearly ramped from
+    0 to `lambda_dann` over the first N epochs (standard DANN practice) to
+    let the gesture head learn a useful representation before the domain-
+    invariance pressure kicks in.
     """
     torch.manual_seed(seed)
     if kind == "OTA_linear":
         model = ComplexLinear(in_dim, num_classes).to(device)
+    elif kind == "Digital_LinMag":
+        model = DigitalLinMag(in_dim, num_classes).to(device)
     elif kind == "Digital_MLP":
         model = DigitalMLP(in_dim, num_classes).to(device)
     elif kind == "Digital_DANN":
@@ -207,8 +251,16 @@ def _train_model(kind, in_dim, num_classes, X_tr, y_tr, device, seed,
             x_dom = xt_in
             d_dom = dt
 
+    warmup = max(0, int(lambda_dann_warmup_epochs))
     model.train()
-    for _ in range(TRAIN_EPOCHS):
+    for epoch in range(TRAIN_EPOCHS):
+        # Linear warmup of the GRL scaling from 0 to lambda_dann over the
+        # first `warmup` epochs; constant at lambda_dann afterwards.
+        if dann_active:
+            if warmup > 0 and epoch < warmup:
+                model.lambd = float(lambda_dann) * (epoch + 1) / warmup
+            else:
+                model.lambd = float(lambda_dann)
         opt.zero_grad()
         if dann_active:
             logits = model(xt_in)
@@ -231,8 +283,8 @@ def _infer(kind, model, X, device):
     if kind == "OTA_linear":
         xt = torch.complex(xt, torch.zeros_like(xt))
     with torch.no_grad():
-        if kind == "OTA_linear":
-            feats = model(xt)                     # pre-argmax |y| magnitudes
+        if kind == "OTA_linear" or kind == "Digital_LinMag":
+            feats = model(xt)                     # pre-argmax |.| magnitudes
             logits = feats
         else:
             feats = model.penultimate(xt)         # penultimate activations
@@ -266,12 +318,15 @@ def load_dataset(args, seed):
     if npz_path.exists():
         loaded = np.load(npz_path, allow_pickle=True)
         mode = str(loaded["feature_mode"]) if "feature_mode" in loaded else "amp"
-        if mode == args.feature:
-            print(f"[data] reusing {npz_path} (feature_mode={mode})")
+        dump_bins = str(loaded["dfs_bins"]) if "dfs_bins" in loaded else "full"
+        wanted_bins = args.dfs_bins if args.feature == "dfs_spec" else "full"
+        if mode == args.feature and dump_bins == wanted_bins:
+            print(f"[data] reusing {npz_path} (feature_mode={mode}, dfs_bins={dump_bins})")
             data = {k: loaded[k] for k in loaded.files}
         else:
-            print(f"[data] {npz_path} built with feature_mode={mode!r} but "
-                  f"--feature={args.feature!r} requested — rebuilding from raw CSI.")
+            print(f"[data] {npz_path} built with feature_mode={mode!r} "
+                  f"dfs_bins={dump_bins!r} but --feature={args.feature!r} "
+                  f"--dfs-bins={wanted_bins!r} requested — rebuilding from raw CSI.")
 
     if data is None:
         from config import get_data_dir
@@ -282,16 +337,17 @@ def load_dataset(args, seed):
             print(f"        Expected CSI root at: {csi_root}")
             print("        Build it first, e.g.:")
             print(f"          python b2_dump_csi.py --feature {args.feature} "
-                  f"--balance-room --seed {args.seed}")
+                  f"--dfs-bins {args.dfs_bins} --balance-room --seed {args.seed}")
             print("        or pass --csi-root /path/to/widar3/CSI")
             sys.exit(1)
         print(f"[data] building CSI features from {csi_root} "
-              f"(feature={args.feature})")
+              f"(feature={args.feature}, dfs_bins={args.dfs_bins})")
         data = build_csi_features(
             csi_root, args.dates,
             keep_users=set(args.users) if args.users else None,
             keep_gestures=set(args.gestures) if args.gestures else None,
             feature=args.feature,
+            dfs_bins=args.dfs_bins,
         )
         data = dict(data)
 
@@ -304,7 +360,7 @@ def load_dataset(args, seed):
 # ─── Evaluation ───────────────────────────────────────────────────────────────
 
 def evaluate_model(kind, X, y_g, groups, y_room, seed, device,
-                   lambda_dann=0.5):
+                   lambda_dann=0.5, lambda_dann_warmup_epochs=0):
     """Run in-domain CV and cross-room evaluation for one model/seed.
 
     Returns a dict with in-domain acc/f1, cross-room acc/f1, aggregated
@@ -330,6 +386,7 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device,
             kind, in_dim, num_classes, Xtr, y_g[tr], device, seed,
             d_tr=d_tr, X_unlab=None, d_unlab=None,
             num_domains=num_domains, lambda_dann=lambda_dann,
+            lambda_dann_warmup_epochs=lambda_dann_warmup_epochs,
         )
         preds, feats = _infer(kind, model, Xte, device)
         in_acc.append(accuracy_score(y_g[te], preds))
@@ -360,6 +417,7 @@ def evaluate_model(kind, X, y_g, groups, y_room, seed, device,
                 kind, in_dim, num_classes, Xtr, y_g[tr], device, seed,
                 d_tr=d_tr, X_unlab=X_unlab, d_unlab=d_unlab,
                 num_domains=num_domains, lambda_dann=lambda_dann,
+                lambda_dann_warmup_epochs=lambda_dann_warmup_epochs,
             )
             preds, _ = _infer(kind, model, Xte, device)
             cross_acc.append(accuracy_score(y_g[te], preds))
@@ -406,7 +464,7 @@ def _save_confusion(kind, feature_mode, y_true, y_pred, num_classes):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-ALL_MODELS = ["OTA_linear", "Digital_MLP", "Digital_DANN"]
+ALL_MODELS = ["OTA_linear", "Digital_LinMag", "Digital_MLP", "Digital_DANN"]
 
 
 def main():
@@ -415,6 +473,11 @@ def main():
                     help="dump base name to reuse/build (default csi)")
     ap.add_argument("--feature", choices=FEATURE_MODES, default="amp",
                     help="CSI feature mode (default amp = original behaviour)")
+    ap.add_argument("--dfs-bins", choices=DFS_BINS_MODES, default="full",
+                    dest="dfs_bins",
+                    help="dfs_spec size regime: full (default, 1536-dim) or "
+                         "small (~150-dim compact low-Doppler band). Only "
+                         "affects --feature dfs_spec; ignored otherwise.")
     ap.add_argument("--balance-room", action="store_true",
                     help="balance rooms so chance ~50%% before training")
     ap.add_argument("--seed", type=int, default=42)
@@ -426,10 +489,17 @@ def main():
     ap.add_argument("--models", nargs="+", choices=ALL_MODELS,
                     default=["OTA_linear", "Digital_MLP"],
                     help="which models to evaluate (any subset of "
-                         "OTA_linear, Digital_MLP, Digital_DANN). Default keeps "
-                         "the original two so existing runs are unchanged.")
-    ap.add_argument("--lambda_dann", type=float, default=0.5,
-                    help="GRL scaling for Digital_DANN's domain-invariance loss")
+                         "OTA_linear, Digital_LinMag, Digital_MLP, "
+                         "Digital_DANN). Default keeps the original two so "
+                         "existing runs are unchanged.")
+    ap.add_argument("--lambda_dann", type=float, default=0.3,
+                    help="GRL scaling target for Digital_DANN's domain-"
+                         "invariance loss (default 0.3, sweep by changing "
+                         "this flag).")
+    ap.add_argument("--lambda_dann_warmup_epochs", type=int, default=50,
+                    help="Number of epochs over which to linearly ramp the "
+                         "GRL scaling from 0 to --lambda_dann (default 50; "
+                         "pass 0 to disable warmup).")
     args = ap.parse_args()
 
     setup_logging("b5_isolation")
@@ -440,8 +510,9 @@ def main():
     print("=" * 70)
     print("B5 — Isolation experiment (computation is the only varying factor)")
     print(f"  features={args.features} feature={args.feature} "
-          f"balance_room={args.balance_room} seeds={seeds}")
-    print(f"  models={args.models} lambda_dann={args.lambda_dann}")
+          f"dfs_bins={args.dfs_bins} balance_room={args.balance_room} seeds={seeds}")
+    print(f"  models={args.models} lambda_dann={args.lambda_dann} "
+          f"warmup_epochs={args.lambda_dann_warmup_epochs}")
     print("=" * 70)
 
     data = load_dataset(args, seed=args.seed)
@@ -484,7 +555,8 @@ def main():
         print(f"\n{'─' * 60}\n  SEED {seed}\n{'─' * 60}")
         for m in models:
             res = evaluate_model(m, X, y_g, groups, y_room, seed, device,
-                                 lambda_dann=args.lambda_dann)
+                                 lambda_dann=args.lambda_dann,
+                                 lambda_dann_warmup_epochs=args.lambda_dann_warmup_epochs)
             agg[m]["in_acc"].append(res["in_acc"])
             agg[m]["in_f1"].append(res["in_f1"])
             agg[m]["cross_acc"].append(res["cross_acc"])
@@ -522,27 +594,39 @@ def main():
 
     print(f"\n{'=' * 70}")
     print(f"  B5 ISOLATION SUMMARY  (mean±std over seeds {seeds})")
-    print(f"  feature_mode = {args.feature}  |  room chance level = {chance_room*100:.1f}%")
+    dfs_note = f" dfs_bins = {args.dfs_bins}" if args.feature == "dfs_spec" else ""
+    print(f"  feature_mode = {args.feature}{dfs_note}  |  "
+          f"room chance level = {chance_room*100:.1f}%")
     print(f"{'=' * 70}")
     header = (f"  {'model':<15} {'in-dom acc':<14} {'in-dom F1':<14} "
-              f"{'cross acc':<14} {'cross F1':<14} {'room-decod':<12}")
+              f"{'cross acc':<14} {'cross F1':<14} {'gap(in-cr)':<14} "
+              f"{'room-decod':<12}")
     print(header)
     print("  " + "─" * (len(header) - 2))
 
-    header_cols = ("feature_mode,model,in_dom_acc,in_dom_f1,cross_room_acc,"
-                   "cross_room_f1,room_decodability,loc_decodability,"
+    header_cols = ("feature_mode,dfs_bins,model,in_dom_acc,in_dom_f1,"
+                   "cross_room_acc,cross_room_f1,in_dom_minus_cross,"
+                   "room_decodability,loc_decodability,"
                    "user_decodability,room_chance,lambda_dann")
     rows_out = []
+    dfs_bins_col = args.dfs_bins if args.feature == "dfs_spec" else "n/a"
     for m in models:
         in_acc, in_f1 = ms(agg[m]["in_acc"]), ms(agg[m]["in_f1"])
         cr_acc, cr_f1 = ms(agg[m]["cross_acc"]), ms(agg[m]["cross_f1"])
+        # Per-seed generalization gap so the mean±std correctly reflects
+        # sample-level uncertainty (not the difference of two independent
+        # aggregates).
+        gap_vals = np.asarray(agg[m]["in_acc"], dtype=float) - \
+            np.asarray(agg[m]["cross_acc"], dtype=float)
+        gap = ms(gap_vals)
         rd = ms(room_dec[m])
         ld, ud = ms(loc_dec[m]), ms(user_dec[m])
-        print(f"  {m:<15} {in_acc:<14} {in_f1:<14} {cr_acc:<14} {cr_f1:<14} {rd:<12}")
+        print(f"  {m:<15} {in_acc:<14} {in_f1:<14} {cr_acc:<14} {cr_f1:<14} "
+              f"{gap:<14} {rd:<12}")
         lam = f"{args.lambda_dann}" if m == "Digital_DANN" else ""
         rows_out.append(
-            f"{args.feature},{m},{in_acc},{in_f1},{cr_acc},{cr_f1},"
-            f"{rd},{ld},{ud},{chance_room*100:.1f},{lam}"
+            f"{args.feature},{dfs_bins_col},{m},{in_acc},{in_f1},{cr_acc},{cr_f1},"
+            f"{gap},{rd},{ld},{ud},{chance_room*100:.1f},{lam}"
         )
 
     # Append rows (with a `feature_mode` column) instead of overwriting, so

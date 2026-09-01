@@ -71,20 +71,43 @@ DFS_SPEC_BINS = 16                  # low-Doppler bins kept per receiver
 DFS_SPEC_FRAMES = 16                # fixed number of STFT time frames
 DFS_SPEC_PER_RX = DFS_SPEC_BINS * DFS_SPEC_FRAMES   # 256 per receiver
 
+# `small` dfs_spec geometry — a compact low-Doppler regime so the total
+# feature dim (~150) is small enough for a single linear+magnitude readout
+# (OTA_linear / Digital_LinMag) to have a fair chance of fitting in-domain.
+DFS_SPEC_BINS_SMALL = 5             # low-Doppler bins kept per receiver
+DFS_SPEC_FRAMES_SMALL = 5           # STFT time frames kept per receiver
+DFS_SPEC_PER_RX_SMALL = DFS_SPEC_BINS_SMALL * DFS_SPEC_FRAMES_SMALL   # 25/rx -> 150 total
+
+DFS_BINS_MODES = ("full", "small")
+
 FEATURE_MODES = ("amp", "amp_phase", "amp_dfs", "dfs_spec")
+
+
+def _dfs_spec_geometry(dfs_bins: str = "full"):
+    """Return (bins, frames, per_rx) for a dfs_spec size regime."""
+    if dfs_bins not in DFS_BINS_MODES:
+        raise ValueError(
+            f"unknown dfs_bins mode {dfs_bins!r}; choose from {DFS_BINS_MODES}")
+    if dfs_bins == "small":
+        return DFS_SPEC_BINS_SMALL, DFS_SPEC_FRAMES_SMALL, DFS_SPEC_PER_RX_SMALL
+    return DFS_SPEC_BINS, DFS_SPEC_FRAMES, DFS_SPEC_PER_RX
 
 # Back-compat defaults (amp mode).
 FEAT_PER_RX = AMP_PER_RX                 # 60
 FEAT_DIM = N_RX_FILES * FEAT_PER_RX      # 360
 
 
-def feature_dim(feature: str = "amp"):
-    """Return (per_receiver_dim, total_dim) for a feature mode."""
+def feature_dim(feature: str = "amp", dfs_bins: str = "full"):
+    """Return (per_receiver_dim, total_dim) for a feature mode.
+
+    `dfs_bins` only affects the dfs_spec mode; other modes are unchanged.
+    """
     if feature not in FEATURE_MODES:
         raise ValueError(
             f"unknown feature mode {feature!r}; choose from {FEATURE_MODES}")
     if feature == "dfs_spec":
-        return DFS_SPEC_PER_RX, DFS_SPEC_PER_RX * N_RX_FILES
+        _, _, per_rx = _dfs_spec_geometry(dfs_bins)
+        return per_rx, per_rx * N_RX_FILES
     per = AMP_PER_RX
     if feature == "amp_phase":
         per += PHASE_PER_RX
@@ -172,17 +195,21 @@ def _dfs_block(csi):
     return band
 
 
-def _dfs_spec_block(csi):
+def _dfs_spec_block(csi, dfs_bins: str = "full"):
     """Doppler-frequency spectrogram, temporal structure preserved.
 
     STFT along the packet/time axis of the antenna-averaged amplitude (DC
     removed), magnitude averaged over subcarriers, keeping the first
-    DFS_SPEC_BINS low-Doppler bins and linearly resampling the STFT time axis
-    to DFS_SPEC_FRAMES. Output shape (DFS_SPEC_BINS, DFS_SPEC_FRAMES), row-
-    major-flattened. Missing/short recordings zero-padded.
+    n_bins low-Doppler bins and linearly resampling the STFT time axis to
+    n_frames. Output shape (n_bins, n_frames), row-major-flattened. Missing
+    or short recordings are zero-padded.
+
+    `dfs_bins`: "full" keeps the original 16x16 geometry; "small" keeps a
+    compact low-Doppler band (5 bins x 5 frames = 25 per receiver).
     """
     from scipy.signal import stft
-    out = np.zeros((DFS_SPEC_BINS, DFS_SPEC_FRAMES), dtype=np.float32)
+    n_bins, n_frames, _ = _dfs_spec_geometry(dfs_bins)
+    out = np.zeros((n_bins, n_frames), dtype=np.float32)
     amp = np.abs(csi).mean(axis=(2, 3))          # (T, 30)
     amp = amp - amp.mean(axis=0, keepdims=True)  # remove static/DC channel
     T = amp.shape[0]
@@ -191,7 +218,7 @@ def _dfs_spec_block(csi):
         return out.reshape(-1)
     _, _, Z = stft(amp, nperseg=nper, axis=0)    # (F, 30, frames)
     spec = np.abs(Z).mean(axis=1)                # (F, frames) subcarrier-avg
-    k = min(DFS_SPEC_BINS, spec.shape[0])
+    k = min(n_bins, spec.shape[0])
     band = spec[:k, :]                            # (k, frames)
     n_fr = band.shape[1]
     if n_fr < 1:
@@ -201,19 +228,19 @@ def _dfs_spec_block(csi):
         out[:k, :] = band[:, :1]
         return out.reshape(-1)
     x_src = np.linspace(0.0, 1.0, n_fr)
-    x_tgt = np.linspace(0.0, 1.0, DFS_SPEC_FRAMES)
+    x_tgt = np.linspace(0.0, 1.0, n_frames)
     for b in range(k):
         out[b, :] = np.interp(x_tgt, x_src, band[b, :]).astype(np.float32)
     return out.reshape(-1)
 
 
-def _receiver_feature(dat_path, feature="amp"):
+def _receiver_feature(dat_path, feature="amp", dfs_bins="full"):
     """Return the per-receiver feature vector for one .dat, or None."""
     csi = _load_receiver_csi(dat_path)
     if csi is None:
         return None
     if feature == "dfs_spec":
-        return _dfs_spec_block(csi).astype(np.float32)
+        return _dfs_spec_block(csi, dfs_bins=dfs_bins).astype(np.float32)
     blocks = [_amp_block(csi)]
     if feature == "amp_phase":
         blocks.append(_phase_block(csi))
@@ -223,7 +250,7 @@ def _receiver_feature(dat_path, feature="amp"):
 
 
 def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
-                       feature="amp", verbose=True):
+                       feature="amp", dfs_bins="full", verbose=True):
     """
     Walk the given date folders and assemble per-sample CSI features + labels.
 
@@ -235,6 +262,11 @@ def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
         feature:       feature mode, one of FEATURE_MODES
                        ("amp" [default, 360], "amp_phase" [720],
                         "amp_dfs" [456], "dfs_spec" [1536, time preserved])
+        dfs_bins:      dfs_spec size regime, one of DFS_BINS_MODES
+                       ("full" [default, 16x16=256/rx -> 1536] or "small"
+                        [5x5=25/rx -> 150] — a compact low-Doppler band
+                        that gives a linear+magnitude readout a fair chance
+                        to fit in-domain). Ignored for non-dfs_spec modes.
 
     Returns a dict of numpy arrays matching the b2 dump schema:
         X, y_room, y_location, y_orientation, y_user, y_gesture, groups
@@ -242,7 +274,10 @@ def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
     if feature not in FEATURE_MODES:
         raise ValueError(
             f"unknown feature mode {feature!r}; choose from {FEATURE_MODES}")
-    per_rx, feat_dim = feature_dim(feature)
+    if dfs_bins not in DFS_BINS_MODES:
+        raise ValueError(
+            f"unknown dfs_bins {dfs_bins!r}; choose from {DFS_BINS_MODES}")
+    per_rx, feat_dim = feature_dim(feature, dfs_bins=dfs_bins)
     csi_root = Path(csi_root)
     samples = defaultdict(dict)   # key -> {rx_id: path}
     meta = {}                     # key -> (user,gesture,loc,ori,rep,room,date)
@@ -287,7 +322,7 @@ def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
             p = rxmap.get(rx)
             if p is None:
                 continue
-            fr = _receiver_feature(p, feature)
+            fr = _receiver_feature(p, feature, dfs_bins=dfs_bins)
             if fr is None:
                 continue
             vec[(rx - 1) * per_rx: rx * per_rx] = fr
@@ -324,7 +359,8 @@ def build_csi_features(csi_root, dates, keep_users=None, keep_gestures=None,
     groups = np.array([g2i[g] for g in group_keys], dtype=np.int64)
 
     if verbose:
-        print(f"[csi] feature mode = {feature}  (per_rx={per_rx}, dim={feat_dim})")
+        extra = f" dfs_bins={dfs_bins}" if feature == "dfs_spec" else ""
+        print(f"[csi] feature mode = {feature}{extra}  (per_rx={per_rx}, dim={feat_dim})")
         print(f"[csi] built {len(X)} samples, dim={X.shape[1]}")
         print(f"[csi] room classes {room_set} counts {dict(Counter(raw_room))}")
         print(f"[csi] user classes {user_set}")
