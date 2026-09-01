@@ -10,6 +10,7 @@ Usage:
     python b2_dump_csi.py
     python b2_dump_csi.py --dates 20181109 20181118 20181117
     python b2_dump_csi.py --csi-root /path/to/widar3/CSI --users 2 3
+    python b2_dump_csi.py --feature amp_phase --balance-room --seed 42
 """
 
 import argparse
@@ -19,7 +20,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data.csi_loader import build_csi_features
+from data.csi_loader import build_csi_features, balance_by_room, FEATURE_MODES
+from config import setup_logging, print_device, set_seed
 
 
 def default_csi_root() -> Path:
@@ -35,8 +37,18 @@ def main():
                     help="user ids to keep (empty = all)")
     ap.add_argument("--gestures", nargs="+", type=int, default=[1, 2, 3, 5, 6],
                     help="gesture ids to keep (empty = all)")
+    ap.add_argument("--feature", choices=FEATURE_MODES, default="amp",
+                    help="CSI feature mode (default amp = original behaviour)")
+    ap.add_argument("--balance-room", action="store_true",
+                    help="subsample the majority room to match the minority "
+                         "room count (whole recordings only), so chance ~50%%")
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    setup_logging("b2_dump_csi")
+    print_device()
+    set_seed(args.seed)
 
     csi_root = Path(args.csi_root) if args.csi_root else default_csi_root()
     out = Path(args.out) if args.out else Path(__file__).parent / "dumps" / "csi.npz"
@@ -44,12 +56,21 @@ def main():
 
     print(f"[csi-dump] root={csi_root}")
     print(f"[csi-dump] dates={args.dates} users={args.users} gestures={args.gestures}")
+    print(f"[csi-dump] feature={args.feature} balance_room={args.balance_room}")
 
     data = build_csi_features(
         csi_root, args.dates,
         keep_users=set(args.users) if args.users else None,
         keep_gestures=set(args.gestures) if args.gestures else None,
+        feature=args.feature,
     )
+    data = dict(data)
+    if args.balance_room:
+        data = balance_by_room(data, seed=args.seed)
+    # Record which mode / balancing built this dump.
+    data["feature_mode"] = np.array(args.feature)
+    data["balanced"] = np.array(bool(args.balance_room))
+
     np.savez(out, **data)
     print(f"[csi-dump] saved {out}  X.shape={data['X'].shape}")
 

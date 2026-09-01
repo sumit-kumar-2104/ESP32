@@ -2,6 +2,7 @@ data/*
 !data/*.py
 *.pt
 results/
+logs/
 __pycache__/
 *.pyc
 .cache/

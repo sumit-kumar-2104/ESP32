@@ -7,6 +7,8 @@ Metasurface-Driven Physical Neural Networks", ACM SIGCOMM 2025.
 
 import os
 import random
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +90,52 @@ def print_data_info(data_dir: Path) -> None:
 # ─── Results directory ────────────────────────────────────────────────────────
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─── Logs directory ───────────────────────────────────────────────────────────
+LOGS_DIR = Path(__file__).parent / "logs"
+
+
+class _Tee:
+    """Duplicate a stream to several targets (console + log file)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def setup_logging(script_name: str) -> Path:
+    """Tee stdout/stderr to a timestamped file under logs/ and return its path."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    log_path = LOGS_DIR / f"{script_name}_{ts}.log"
+    fh = open(log_path, "a", encoding="utf-8")
+    sys.stdout = _Tee(sys.__stdout__, fh)
+    sys.stderr = _Tee(sys.__stderr__, fh)
+    print(f"[log] writing timestamped log to {log_path}")
+    return log_path
+
+
+def get_device() -> "torch.device":
+    """Return the compute device (CUDA if available, else CPU)."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def print_device() -> "torch.device":
+    """Print and return the compute device."""
+    dev = get_device()
+    if dev.type == "cuda":
+        print(f"[device] using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("[device] using CPU")
+    return dev
 
 # ─── Seed setter ──────────────────────────────────────────────────────────────
 def set_seed(seed: int = SEED) -> None:
