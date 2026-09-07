@@ -152,13 +152,18 @@ def _make_splits(
     profile: Profile,
     splits_dir: Path,
     log: Log,
-) -> list[tuple[str, splits_mod.Split]]:
-    """Materialise the concrete Split objects requested by a suite."""
+) -> tuple[list[tuple[str, splits_mod.Split]], list[dict]]:
+    """Materialise splits; return (valid, errors). Errors carry the
+    intended split_id + kind + reason so the runner can enrol placeholder
+    ``unavailable`` rows and surface them in summaries.
+    """
     out: list[tuple[str, splits_mod.Split]] = []
-    for spec in suite.splits:
-        kind = spec.get("kind")
+    errors: list[dict] = []
+    for i, spec in enumerate(suite.splits):
+        kind = spec.get("kind", "unknown")
         seed = int(spec.get("seed", profile.seeds[0]))
-        split_id = spec.get("id")
+        # Fall back to a stable id when the profile did not name the split.
+        split_id = spec.get("id") or f"{kind}_{i}"
         try:
             if kind == "indomain_grouped":
                 split = splits_mod.indomain_grouped(
@@ -191,17 +196,20 @@ def _make_splits(
                     seed=seed, split_id=split_id,
                 )
             else:
-                log(f"[splits] SKIP suite={suite.name} unknown split kind={kind!r}")
+                reason = f"unknown split kind {kind!r}"
+                log(f"[splits] SKIP {split_id}: {reason}")
+                errors.append({"split_id": split_id, "kind": kind, "reason": reason})
                 continue
         except splits_mod.InvalidSplitError as e:
-            log(f"[splits] SKIP {kind}: {e}")
+            log(f"[splits] SKIP {kind} ({split_id}): {e}")
+            errors.append({"split_id": split_id, "kind": kind, "reason": str(e)})
             continue
         split.write(splits_dir)
         out.append((split.split_id, split))
         log(f"[splits] wrote {split.split_id} "
             f"(train={len(split.train_ids)}, val={len(split.val_ids)}, "
             f"test={len(split.test_ids)})")
-    return out
+    return out, errors
 
 
 def _build_feature_bundle(
@@ -331,18 +339,50 @@ def _run_suite(
     log: Log,
     force: bool,
 ) -> tuple[list[dict], int]:
-    """Return (index_rows, n_failed)."""
-    rows: list[dict] = []
-    n_failed = 0
+    """Return (index_rows, n_required_missing).
 
-    concrete_splits = _make_splits(records, suite, profile, layout.splits, log)
+    ``n_required_missing`` counts everything in this suite that did NOT
+    reach ``completed`` — but only when the suite is marked required. It
+    is the number the top-level exit code depends on, so a split-level
+    skip in a required suite propagates the same way as an arm-level
+    failure.
+    """
+    rows: list[dict] = []
+
+    concrete_splits, split_errors = _make_splits(
+        records, suite, profile, layout.splits, log,
+    )
+
+    # Every skipped split still produces one ``unavailable`` row per
+    # (arm, seed) so summaries and status counters reflect reality.
+    for err in split_errors:
+        reason = f"split unavailable ({err['kind']}): {err['reason']}"
+        for arm_name in suite.arms:
+            for seed in seeds:
+                exp_dir = layout.experiment_dir(
+                    suite.name, err["split_id"], arm_name, seed,
+                )
+                exp_dir.mkdir(parents=True, exist_ok=True)
+                status_mod.write_status(
+                    exp_dir / "status.json",
+                    status="unavailable", reason=reason,
+                )
+                rows.append({
+                    "suite": suite.name, "split_id": err["split_id"],
+                    "arm": arm_name, "seed": seed,
+                    "status": "unavailable", "reason": reason,
+                })
+
     if not concrete_splits:
-        log(f"[suite:{suite.name}] no valid splits — marking suite unavailable")
-        return rows, (1 if suite.required else 0)
+        req = "required" if suite.required else "optional"
+        log(f"[suite:{suite.name}] no valid splits ({req}) — "
+            f"{len(rows)} experiments marked unavailable")
+        return rows, (len(rows) if suite.required else 0)
 
     bundle = _build_feature_bundle(
         profile, records, suite.feature_mode, suite.dfs_bins, log,
     )
+    n_failed = 0
 
     for split_id, split in concrete_splits:
         try:
@@ -461,6 +501,11 @@ def _run_suite(
                 })
                 log(f"[ok] {suite.name}/{split_id}/{arm_name}/seed_{seed}: "
                     f"test_acc={summary.get('test_accuracy'):.4f}")
+    # For required suites, count both arm-level failures and any
+    # split-level unavailable rows we enrolled above.
+    if suite.required:
+        n_missing = sum(1 for r in rows if r["status"] != "completed")
+        return rows, n_missing
     return rows, n_failed
 
 

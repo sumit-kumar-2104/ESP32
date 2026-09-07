@@ -135,8 +135,10 @@ def _train_logreg(
     class_index_to_gesture: dict[int, int],
 ) -> dict:
     from sklearn.linear_model import LogisticRegression
+    # Raw CSI is ~5760-d; lbfgs needs headroom to converge on train-only
+    # scaled features. Bumped from 1000 after ConvergenceWarning on core.
     clf = LogisticRegression(
-        max_iter=1000, solver="lbfgs", random_state=seed,
+        max_iter=5000, solver="lbfgs", random_state=seed,
     )
     clf.fit(X_train, y_train)
     val_pred = clf.predict(X_val)
