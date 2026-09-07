@@ -1,0 +1,39 @@
+# Smoke profile — small, clearly labelled functional checks.
+#
+# This profile does NOT touch the real Widar3.0 CSI. It builds a synthetic
+# fixture, exercises every code path (manifest, splits, feature bundle,
+# scaler, arms, status, resume) and produces persisted artefacts so the
+# operator can verify the harness before spending GPU time.
+#
+# Nothing in this profile is a scientific result. `use_synthetic: true`
+# is echoed into resolved_config.yaml and every findings summary.
+
+name: smoke
+label: "synthetic fixture — smoke test only, NOT scientific results"
+use_synthetic: true
+dates: []
+seeds: [42, 43]
+quality_policy: reject
+min_packets: 8
+read_packet_counts: false
+
+suites:
+  - name: harness_check
+    required: true
+    kind: raw_amplitude
+    feature_mode: SYNTHETIC_FIXTURE
+    arms:
+      - logreg_raw
+    splits:
+      - kind: indomain_grouped
+        id: smoke_indomain
+        date: "20181109"
+        val_frac: 0.2
+        test_frac: 0.2
+        seed: 42
+      - kind: cross_room
+        id: smoke_cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.2
+        seed: 42

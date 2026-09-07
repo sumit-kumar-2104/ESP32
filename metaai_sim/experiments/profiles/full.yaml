@@ -1,0 +1,106 @@
+# Full profile — core plus bounded representation/DFS ablations and
+# supported domain-learning experiments. No unattended hardware execution.
+#
+# Requires a populated Widar3.0 raw CSI directory.
+
+name: full
+label: "core + bounded DFS ablations + supported domain-learning arms"
+use_synthetic: false
+dates: ["20181109", "20181118"]
+seeds: [42, 43, 44]
+quality_policy: reject
+min_packets: 64
+read_packet_counts: false
+
+suites:
+  - name: raw_indomain
+    required: true
+    kind: raw_amplitude
+    feature_mode: raw
+    arms:
+      - logreg_raw
+      - digital_mlp_raw
+      - ota_raw_baseline
+      - ota_raw_R1
+      - ota_raw_R2
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+
+  - name: raw_cross_date
+    required: true
+    kind: raw_amplitude
+    feature_mode: raw
+    arms:
+      - logreg_raw
+      - digital_mlp_raw
+      - ota_raw_baseline
+      - ota_raw_R1
+    splits:
+      - kind: held_out_date
+        id: heldout_test_20181118
+        train_dates: ["20181109"]
+        test_date: "20181118"
+        val_frac: 0.15
+        seed: 42
+
+  - name: raw_cross_room
+    required: false
+    kind: raw_amplitude
+    feature_mode: raw
+    arms:
+      - logreg_raw
+      - digital_mlp_raw
+      - ota_raw_baseline
+      - ota_raw_R1
+    splits:
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_2_to_1
+        source_room: 2
+        target_room: 1
+        val_frac: 0.15
+        seed: 42
+
+  - name: dfs_debug
+    required: false
+    kind: dfs_debug
+    feature_mode: dfs_spec
+    dfs_bins: full
+    arms:
+      - logreg_dfs
+      - digital_mlp_dfs
+      - ota_dfs_baseline
+      - ota_dfs_R1
+      - ota_dfs_R2
+    splits:
+      - kind: indomain_grouped
+        id: dfs_indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+
+  - name: loro
+    required: false
+    kind: raw_amplitude
+    feature_mode: raw
+    arms:
+      - logreg_raw
+      - digital_mlp_raw
+      - ota_raw_baseline
+    splits:
+      - kind: leave_one_room_out
+        id: loro_room_2
+        held_out_room: 2
+        val_frac: 0.15
+        seed: 42
