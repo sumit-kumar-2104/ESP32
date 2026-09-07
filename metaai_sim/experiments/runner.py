@@ -45,6 +45,7 @@ from experiments import manifest as manifest_mod
 from experiments import metrics as metrics_mod
 from experiments import paths as paths_mod
 from experiments import provenance
+from experiments import report as report_mod
 from experiments import splits as splits_mod
 from experiments import status as status_mod
 
@@ -673,9 +674,13 @@ def run(argv: list[str] | None = None) -> int:
             reason=f"{total_required_failed} required-suite failures",
             extra={"counts": counts},
         )
+        report_path = report_mod.write_run_report(layout)
+        log(f"[report] wrote {report_path}")
         return 1
     status_mod.write_status(layout.status, status="completed",
                              extra={"counts": counts})
+    report_path = report_mod.write_run_report(layout)
+    log(f"[report] wrote {report_path}")
     return 0
 
 
