@@ -17,6 +17,17 @@ quality_policy: reject
 min_packets: 8
 read_packet_counts: false
 
+# Six-class default so tests exercise the same chance/majority baselines
+# as the primary path. The synthetic fixture only ships three physical
+# gestures, so a subset of the declared set will be seen at runtime.
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: "smoke fixture; matches core profile default"
+  evidence: "docs/gesture_set_evidence.md"
+
+tasks_1_3_ready: false
+
 suites:
   - name: harness_check
     required: true

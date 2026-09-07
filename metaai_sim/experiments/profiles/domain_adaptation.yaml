@@ -1,0 +1,68 @@
+# Domain-adaptation / domain-generalisation experiment profile.
+#
+# GATED. Nothing here executes unless BOTH:
+#   1. tasks_1_3_ready: true (gesture set + inventory + duplicate-split
+#      resolution + same-room/different-date support are recorded).
+#   2. The manifest exposes enough source environments for the method
+#      (>=2 labelled source environments for DG, unlabelled target for UDA).
+#
+# When either gate fails, every arm is enrolled as ``unavailable`` with
+# the exact reason "insufficient source environments" (or a similar
+# message) so the omission is discoverable. NOTHING TRAINS UNTIL A
+# FOLLOW-UP CHANGE FLIPS THE PROFILE OFF THIS SAFETY.
+#
+# The core profile does NOT include this file; it must be selected
+# explicitly with --profile domain_adaptation.
+
+name: domain_adaptation
+label: "domain-generalisation / adaptation experiments (PREPARED, gated)"
+use_synthetic: false
+dates: ["20181109", "20181118"]
+seeds: [42, 43, 44]
+quality_policy: reject
+min_packets: 64
+read_packet_counts: false
+
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: "matches core profile; see docs/gesture_set_evidence.md"
+  evidence: "docs/gesture_set_evidence.md"
+
+# Runner refuses to execute domain arms unless this is explicitly true
+# AND a same-room / different-date split is available under the active
+# gesture set.
+tasks_1_3_ready: true
+
+suites:
+  - name: domain_generalisation
+    required: false
+    kind: domain_learning
+    feature_mode: raw
+    arms:
+      - erm_raw
+      - dann_raw
+      - coral_raw
+      - irm_raw
+    splits:
+      - kind: cross_room
+        id: dg_cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  - name: unsupervised_domain_adaptation
+    required: false
+    kind: domain_learning
+    feature_mode: raw
+    arms:
+      - uda_dann_raw
+      - uda_coral_raw
+    splits:
+      - kind: cross_room
+        id: uda_cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42

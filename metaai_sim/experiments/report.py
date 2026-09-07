@@ -159,6 +159,7 @@ def _header_block(manifest: dict, layout: paths_mod.RunLayout) -> str:
     git = manifest.get("git") or {}
     device = manifest.get("device") or {}
     counts = manifest.get("counts") or {}
+    gset = manifest.get("gesture_set") or {}
     top_status = status_mod.read_status(layout.status) or {}
     lines = [
         BAR,
@@ -176,11 +177,20 @@ def _header_block(manifest: dict, layout: paths_mod.RunLayout) -> str:
         f"dataset dir:   {manifest.get('dataset_dir') or 'n/a'}",
         f"raw csi dir:   {manifest.get('raw_csi_dir') or 'n/a'}",
         "",
+        f"gesture_set:   label={gset.get('label', 'n/a')}  "
+        f"ids={gset.get('ids', 'n/a')}  n_classes={gset.get('n_classes', 'n/a')}  "
+        f"chance={_fmt_pct(gset.get('chance_level'))}",
+        f"gesture_set justification: {gset.get('justification', 'n/a')}",
+        f"gesture_set evidence:      {gset.get('evidence', 'n/a')}",
+        "",
         f"OVERALL STATUS: {top_status.get('status', 'n/a')}"
         + (f"  ({top_status.get('reason')})" if top_status.get('reason') else ""),
         f"counts:  " + "  ".join(f"{k}={counts.get(k, 0)}" for k in
                                   ("completed", "failed", "unavailable",
-                                   "pending", "running")),
+                                   "alias_of", "pending", "running")),
+        f"unique_completed={counts.get('unique_completed', 0)}  "
+        f"executed_rows={counts.get('executed_rows', 0)}  "
+        "(alias_of splits count toward executed rows only, never unique)",
     ]
     return "\n".join(lines) + "\n"
 
@@ -314,6 +324,43 @@ def _issues_block(rows: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _inventory_and_aliases_block(manifest: dict, layout: paths_mod.RunLayout) -> str:
+    lines = [_section("INVENTORY  &  SPLIT ALIASES")]
+    inv = manifest.get("inventory") or {}
+    dedup = manifest.get("dedup") or {}
+    if inv:
+        lines.append(f"rooms_seen:          {inv.get('rooms_seen')}")
+        lines.append(f"dates_seen:          {inv.get('dates_seen')}")
+        lines.append(f"dates_per_room:      {inv.get('dates_per_room')}")
+        lines.append(f"rooms_with_multiple_dates: {inv.get('rooms_with_multiple_dates')}")
+        lines.append(
+            f"same_room_diff_date_available: {inv.get('same_room_diff_date_available')}"
+        )
+        if not inv.get("same_room_diff_date_available"):
+            lines.append(
+                f"  reason: {inv.get('same_room_diff_date_reason')}"
+            )
+        for c in inv.get("same_room_diff_date_candidates") or []:
+            lines.append(
+                f"  candidate: room={c.get('room')} "
+                f"date_a={c.get('date_a')} date_b={c.get('date_b')} "
+                f"shared_gestures_active={c.get('shared_gestures_active')}"
+            )
+    if dedup:
+        lines.append("")
+        lines.append("split dedup / aliases:")
+        for suite_name, info in dedup.items():
+            lines.append(
+                f"  suite={suite_name}: unique={info.get('n_unique')} "
+                f"aliases={info.get('n_aliases')}"
+            )
+            for alias_id, canonical_id in (info.get("aliases") or {}).items():
+                lines.append(
+                    f"    {alias_id}  ->  alias_of  {canonical_id}"
+                )
+    return "\n".join(lines) + "\n"
+
+
 def _notes_block() -> str:
     lines = [_section("INTERPRETATION NOTES")]
     lines.extend([
@@ -324,6 +371,13 @@ def _notes_block() -> str:
         "  from persisted predictions/test_predictions.csv.",
         "- Room and recording date are confounded in the packaged Widar3.0 tree",
         "  (20181109 = room 1, 20181118 = room 2). 'cross-room' is also cross-date.",
+        "- The six-class task has a chance level of 1/6 = 16.67%.  The earlier 20% ",
+        "  reference described a FIVE-class task (gesture 4 excluded) and does not",
+        "  apply to the current configuration; see docs/gesture_set_evidence.md.",
+        "- alias_of rows resolve to identical (train, val, test) membership as",
+        "  their canonical split; they are NEVER counted as independent evidence.",
+        "- Splits listed under INVENTORY as 'same_room_diff_date_available=false'",
+        "  cannot separate room from session with the packaged data.",
         "- Statistical equivalence / non-inferiority is not auto-emitted. Only",
         "  mean +/- std across seeds is reported; interpret with care.",
         BAR,
@@ -341,6 +395,7 @@ def write_run_report(layout: paths_mod.RunLayout) -> Path:
     parts = [
         _header_block(manifest, layout),
         _data_audit_block(audit),
+        _inventory_and_aliases_block(manifest, layout),
         _splits_block(splits),
         _experiments_block(rows),
         _aggregate_block(rows),

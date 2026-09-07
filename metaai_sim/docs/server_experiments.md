@@ -150,19 +150,65 @@ enumerated in a profile.
 
 ## 6. Scientific limitations and interpretation rules
 
-- Every historical number in `README.md` was collected on a different
-  branch, a different split policy, and (in some cases) used validation
-  as its early-stop-and-report set. Those numbers are context only.
-  Fresh runs of this harness produce their own metrics, and only those
-  appear under `results/`.
-- Room and recording date are confounded in the packaged Widar3.0 tree
-  (`20181109` = room 1, `20181118` = room 2). Any "cross-room"
-  observation is also cross-date and cannot isolate the room effect
-  alone. `Split.notes["room_date_confound"]` records this.
-- Statistical equivalence / non-inferiority claims are NOT auto-emitted.
-  The aggregator only reports mean and std across seeds; no equivalence
-  margin is invented. Interpretation requires an explicit configured
-  test.
+- **Chance level.** The six-class task in this branch has a chance level
+  of `1/6 = 16.67%`, not 20%. The earlier 20% reference described a
+  *five-class* variant (gesture 4 excluded); it is not the correct
+  baseline for the current six-class configuration. See
+  [`docs/gesture_set_evidence.md`](gesture_set_evidence.md) for the
+  gesture-4 decision and its evidence — gesture 4 = *Slide* on both
+  `20181109` and `20181118` per `metaai_sim/gesture_map.py`, so the
+  six-class configuration is primary. A five-class variant with gesture
+  4 excluded remains runnable at
+  `experiments/profiles/core_five_class.yaml`.
+- **Active gesture set is explicit.** Every profile declares
+  `gesture_set:` with `ids`, `label`, `justification` and `evidence`.
+  Chance and majority baselines are recomputed **per split, per
+  variant** and never inherited across variants. The active set is
+  echoed into `run_manifest.json`, `resolved_config.yaml`, every
+  per-split baseline JSON under `summaries/per_split_baselines/`, and
+  the top-of-run `RUN_SUMMARY.txt`.
+- **Current findings (persisted).**
+  - In-domain locked-test accuracy: ~83.8% digital MLP, ~75.1% OTA
+    baseline, ~74.8% OTA R1, ~74.1% OTA R2, ~70.4% logreg, against a
+    ~16.7% majority baseline.
+  - Cross-room 1↔2 accuracy: **at chance (16.6-17.2%)**, with
+    near-constant predictions (collapse indicator fires; see
+    [`experiments/collapse.py`](../experiments/collapse.py)).
+- **Room / date confound.** Room and recording date are fully
+  confounded in the packaged Widar3.0 tree (`20181109` = room 1,
+  `20181118` = room 2). No experiment in this branch can attribute
+  cross-domain failure to room specifically. The runner enumerates a
+  `same_room_different_date` split kind and emits an inventory into
+  `run_manifest.json::inventory`; when the packaged data cannot
+  materialise it, the arms are enrolled as `unavailable` with the exact
+  reason. Do not describe any confounded result as a room effect.
+- **Duplicate splits are deduplicated.** `cross_room_1_to_2` and
+  `heldout_test_20181118` resolve to identical membership under the
+  packaged tree. The runner keeps one canonical row and records the
+  other as `alias_of` in per-experiment `status.json` and in the run
+  manifest. Only *canonical* completed rows contribute to
+  `unique_completed`; alias rows contribute only to `executed_rows`.
+- **Confirmatory vs exploratory.** The primary comparison per
+  cross-domain split kind is pre-registered in
+  [`experiments/stats.py::PRIMARY_COMPARISONS`](../experiments/stats.py).
+  All other rows are exploratory; the diagnostic report reports raw,
+  BH-FDR-adjusted and Holm-Bonferroni-adjusted p-values plus a
+  maximum-statistic null so post-hoc-selected results are compared
+  honestly. Deterministic replicates (fixed-seed sklearn logreg) count
+  as ONE measurement. Any result within ± 2 accuracy points of `1/K` is
+  never reported as significant regardless of p-value.
+- **Historical 92.80% comparison.** Three factors changed together:
+  five classes → six, users `[2, 3]` → `[1, 2, 3]`, split policy
+  non-grouped random → recording-grouped. The repository does not
+  reconstruct the earlier configuration; the old and new numbers are
+  NOT presented as a controlled comparison. See
+  [`docs/results_interpretation.md`](results_interpretation.md) for
+  the full statement.
+- **Every historical number in the top-level `README.md`** was collected
+  on a different branch and split policy. Fresh runs of this harness
+  produce their own metrics, and only those appear under `results/`.
+- **Statistical equivalence / non-inferiority claims are NOT
+  auto-emitted.** Interpretation requires an explicit configured test.
 - Physical / hardware validation is not part of this branch. The
   hardware checklist lives at `docs/hardware_validation_checklist.md`
   as a template; no synthetic "measured hardware" numbers exist.
@@ -184,17 +230,35 @@ scaler-train-only assertion, and summary generation.
 
 ## 8. Not yet implemented / out of scope for this branch
 
-The task specification asked for coverage of §6 controlled representation
-ablations, §7 bounded DFS diagnostics beyond the existing R1/R2 hooks, §8
-domain-learning experiments, and §9 phase / physical-validation
-boundaries. Those are enumerable via new profile files without touching
-runner code — the runner already supports any suite/arm/split
-combination the profile declares. Adding them cleanly requires:
+Domain-generalisation / adaptation (§8 in the task specification) is
+**prepared** in this branch but **not yet executed**:
+
+- Configuration lives in
+  [`experiments/profiles/domain_adaptation.yaml`](../experiments/profiles/domain_adaptation.yaml).
+- Arm registry lives in
+  [`experiments/domain_adaptation.py`](../experiments/domain_adaptation.py).
+- Gating rules refuse a multi-environment method when only one training
+  environment exists (exact reason: *"insufficient source
+  environments"*), refuse UDA arms without unlabelled target features,
+  and refuse everything until `tasks_1_3_ready: true` is set.
+- Even when gating passes, the training loop itself is not wired; every
+  arm enrols as `unavailable` with reason "domain-adaptation training
+  loop not enabled in this profile (task 8: prepare, do not yet run)".
+- The core profile does NOT include this file — running DA/DG requires
+  `--profile domain_adaptation` explicitly.
+
+The remaining §6 controlled representation ablations, §7 bounded DFS
+diagnostics beyond the existing R1/R2 hooks, and §9 phase / physical
+validation are enumerable via new profile files without touching runner
+code. Adding them cleanly requires:
 
 1. A DFS-oriented arm registry entry per ablation (temporal shuffle,
    time-averaged, static-background removal). Each needs a feature
    builder that documents whether it uses training-fold-only information.
-2. Explicit multi-source-room profiles to make DANN/CORAL/IRM meaningful.
+2. A same-room / different-date split that is materialisable — the
+   inventory report in `run_manifest.json::inventory` and the "INVENTORY
+   & SPLIT ALIASES" block in `RUN_SUMMARY.txt` state whether that is
+   currently possible; on the packaged data it is not.
 3. A hardware measurement-record schema under
    `docs/hardware_validation_checklist.md` before any physical numbers
    are written.

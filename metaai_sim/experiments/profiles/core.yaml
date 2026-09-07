@@ -13,6 +13,29 @@ quality_policy: reject
 min_packets: 64
 read_packet_counts: false   # set true only when running on a workstation with slack
 
+# Active gesture set. See docs/gesture_set_evidence.md — six-class is
+# primary because gesture 4 = "Slide" on both 20181109 and 20181118.
+# Chance and majority baselines are recomputed per split from these ids
+# and never inherited across variants.
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: >
+    Widar3.0 Data instructions.pdf and metaai_sim/gesture_map.py both list
+    gestures 1-4 (Push&Pull / Sweep / Clap / Slide) as identical on
+    20181109 and 20181118. Ids 5 and 6 are overloaded across dates and
+    are treated as a cross-date label shift, recorded in every
+    cross-date split's notes.
+  evidence: "docs/gesture_set_evidence.md"
+  provenance: >
+    Widar3.0 IEEE DataPort release, Data instructions.pdf,
+    Table "Gesture ID for each date"; mirrored in
+    metaai_sim/gesture_map.py::GESTURE_MAP_BY_DATE.
+
+# Tasks 1-3 gate DA/DG suites. Core stays FALSE so the gate refuses
+# domain-learning arms even if a downstream profile inherits from here.
+tasks_1_3_ready: true
+
 suites:
   - name: raw_indomain
     required: true

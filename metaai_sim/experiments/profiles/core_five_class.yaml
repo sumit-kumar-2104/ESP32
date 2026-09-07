@@ -1,10 +1,12 @@
-# Full profile — core plus bounded representation/DFS ablations and
-# supported domain-learning experiments. No unattended hardware execution.
+# Five-class variant of the core profile — gesture 4 (Slide) excluded.
 #
-# Requires a populated Widar3.0 raw CSI directory.
+# Documented evidence in docs/gesture_set_evidence.md shows gesture 4 is
+# identical (=Slide) on 20181109 and 20181118, so six-class is primary.
+# This variant is kept runnable as a defence-in-depth comparison so the
+# effect of gesture-4 exclusion can be quantified explicitly.
 
-name: full
-label: "core + bounded DFS ablations + supported domain-learning arms"
+name: core_five_class
+label: "raw-amplitude core (five-class variant, gesture 4 excluded)"
 use_synthetic: false
 dates: ["20181109", "20181118"]
 seeds: [42, 43, 44]
@@ -13,10 +15,17 @@ min_packets: 64
 read_packet_counts: false
 
 gesture_set:
-  ids: [1, 2, 3, 4, 5, 6]
-  label: "six-class-default"
-  justification: "matches core profile; see docs/gesture_set_evidence.md"
+  ids: [1, 2, 3, 5, 6]
+  label: "five-class-drop-g4"
+  justification: >
+    Defence-in-depth variant. Earlier project work excluded gesture 4;
+    docs/gesture_set_evidence.md shows gesture 4 IS identical across the
+    two active dates, so this variant is exploratory rather than primary.
   evidence: "docs/gesture_set_evidence.md"
+  provenance: >
+    Kept runnable per the task-1 specification which required both a
+    six-class and a five-class variant to be executable regardless of
+    which is designated primary.
 
 tasks_1_3_ready: true
 
@@ -33,7 +42,7 @@ suites:
       - ota_raw_R2
     splits:
       - kind: indomain_grouped
-        id: indomain_20181109
+        id: indomain_20181109_5c
         date: "20181109"
         val_frac: 0.15
         test_frac: 0.15
@@ -50,7 +59,7 @@ suites:
       - ota_raw_R1
     splits:
       - kind: held_out_date
-        id: heldout_test_20181118
+        id: heldout_test_20181118_5c
         train_dates: ["20181109"]
         test_date: "20181118"
         val_frac: 0.15
@@ -67,48 +76,14 @@ suites:
       - ota_raw_R1
     splits:
       - kind: cross_room
-        id: cross_room_1_to_2
+        id: cross_room_1_to_2_5c
         source_room: 1
         target_room: 2
         val_frac: 0.15
         seed: 42
       - kind: cross_room
-        id: cross_room_2_to_1
+        id: cross_room_2_to_1_5c
         source_room: 2
         target_room: 1
-        val_frac: 0.15
-        seed: 42
-
-  - name: dfs_debug
-    required: false
-    kind: dfs_debug
-    feature_mode: dfs_spec
-    dfs_bins: full
-    arms:
-      - logreg_dfs
-      - digital_mlp_dfs
-      - ota_dfs_baseline
-      - ota_dfs_R1
-      - ota_dfs_R2
-    splits:
-      - kind: indomain_grouped
-        id: dfs_indomain_20181109
-        date: "20181109"
-        val_frac: 0.15
-        test_frac: 0.15
-        seed: 42
-
-  - name: loro
-    required: false
-    kind: raw_amplitude
-    feature_mode: raw
-    arms:
-      - logreg_raw
-      - digital_mlp_raw
-      - ota_raw_baseline
-    splits:
-      - kind: leave_one_room_out
-        id: loro_room_2
-        held_out_room: 2
         val_frac: 0.15
         seed: 42

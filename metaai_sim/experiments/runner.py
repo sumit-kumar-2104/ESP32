@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -40,7 +40,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments import arms as arms_mod
+from experiments import collapse as collapse_mod
+from experiments import dedup as dedup_mod
+from experiments import domain_adaptation as da_mod
 from experiments import features as features_mod
+from experiments import gesture_set as gs_mod
+from experiments import inventory as inventory_mod
 from experiments import manifest as manifest_mod
 from experiments import metrics as metrics_mod
 from experiments import paths as paths_mod
@@ -76,6 +81,10 @@ class Profile:
     quality_policy: str = "reject"
     min_packets: int = 64
     read_packet_counts: bool = False
+    gesture_set: dict = field(default_factory=dict)
+    tasks_1_3_ready: bool = False
+    collapse_top_share_threshold: float = collapse_mod.DEFAULT_COLLAPSE_TOP_SHARE
+    collapse_min_classes_predicted: int = collapse_mod.DEFAULT_COLLAPSE_MIN_CLASSES_PREDICTED
 
 
 def load_profile(path: Path) -> Profile:
@@ -106,6 +115,16 @@ def load_profile(path: Path) -> Profile:
         quality_policy=data.get("quality_policy", "reject"),
         min_packets=int(data.get("min_packets", 64)),
         read_packet_counts=bool(data.get("read_packet_counts", False)),
+        gesture_set=dict(data.get("gesture_set") or {}),
+        tasks_1_3_ready=bool(data.get("tasks_1_3_ready", False)),
+        collapse_top_share_threshold=float(
+            data.get("collapse_top_share_threshold",
+                     collapse_mod.DEFAULT_COLLAPSE_TOP_SHARE)
+        ),
+        collapse_min_classes_predicted=int(
+            data.get("collapse_min_classes_predicted",
+                     collapse_mod.DEFAULT_COLLAPSE_MIN_CLASSES_PREDICTED)
+        ),
     )
 
 
@@ -196,6 +215,15 @@ def _make_splits(
                     val_frac=float(spec.get("val_frac", 0.15)),
                     seed=seed, split_id=split_id,
                 )
+            elif kind == "same_room_different_date":
+                split = splits_mod.same_room_different_date(
+                    records,
+                    room=int(spec["room"]),
+                    train_date=str(spec["train_date"]),
+                    test_date=str(spec["test_date"]),
+                    val_frac=float(spec.get("val_frac", 0.15)),
+                    seed=seed, split_id=split_id,
+                )
             else:
                 reason = f"unknown split kind {kind!r}"
                 log(f"[splits] SKIP {split_id}: {reason}")
@@ -237,6 +265,7 @@ def _build_feature_bundle(
 
 def _write_resolved_config(
     layout: paths_mod.RunLayout, profile: Profile, args: argparse.Namespace,
+    gesture_set: "gs_mod.GestureSet | None" = None,
 ) -> None:
     import yaml
     resolved = {
@@ -250,6 +279,13 @@ def _write_resolved_config(
         "quality_policy": profile.quality_policy,
         "min_packets": profile.min_packets,
         "read_packet_counts": profile.read_packet_counts,
+        "tasks_1_3_ready": profile.tasks_1_3_ready,
+        "collapse_top_share_threshold": profile.collapse_top_share_threshold,
+        "collapse_min_classes_predicted": profile.collapse_min_classes_predicted,
+        "gesture_set": (
+            gesture_set.to_dict() if gesture_set is not None
+            else dict(profile.gesture_set)
+        ),
         "suites": [asdict(s) for s in profile.suites],
     }
     layout.resolved_config.write_text(
@@ -339,6 +375,8 @@ def _run_suite(
     device_pref: str,
     log: Log,
     force: bool,
+    gesture_set: gs_mod.GestureSet,
+    dedup_state: dict[str, "dedup_mod.DedupResult"],
 ) -> tuple[list[dict], int]:
     """Return (index_rows, n_required_missing).
 
@@ -353,6 +391,9 @@ def _run_suite(
     concrete_splits, split_errors = _make_splits(
         records, suite, profile, layout.splits, log,
     )
+    dedup_result = dedup_mod.dedup_splits(concrete_splits)
+    dedup_state[suite.name] = dedup_result
+    canonical_ids = {sid for sid, _ in dedup_result.canonical}
 
     # Every skipped split still produces one ``unavailable`` row per
     # (arm, seed) so summaries and status counters reflect reality.
@@ -374,7 +415,35 @@ def _run_suite(
                     "status": "unavailable", "reason": reason,
                 })
 
-    if not concrete_splits:
+    # Any split that resolved to a duplicate of an earlier split gets an
+    # explicit ``alias_of`` row per (arm, seed) — never executed, never
+    # counted as an independent evaluation. The alias mapping is echoed
+    # in the run manifest and RUN_SUMMARY.
+    for alias_id, canonical_id in dedup_result.aliases.items():
+        reason = (
+            f"alias_of={canonical_id}: identical (train, val, test) "
+            f"membership under gesture_set={gesture_set.label}"
+        )
+        log(f"[splits] ALIAS {alias_id} -> {canonical_id} ({reason})")
+        for arm_name in suite.arms:
+            for seed in seeds:
+                exp_dir = layout.experiment_dir(
+                    suite.name, alias_id, arm_name, seed,
+                )
+                exp_dir.mkdir(parents=True, exist_ok=True)
+                status_mod.write_status(
+                    exp_dir / "status.json",
+                    status="alias_of", reason=reason,
+                    extra={"canonical_split_id": canonical_id},
+                )
+                rows.append({
+                    "suite": suite.name, "split_id": alias_id,
+                    "arm": arm_name, "seed": seed,
+                    "status": "alias_of", "reason": reason,
+                    "canonical_split_id": canonical_id,
+                })
+
+    if not dedup_result.canonical:
         req = "required" if suite.required else "optional"
         log(f"[suite:{suite.name}] no valid splits ({req}) — "
             f"{len(rows)} experiments marked unavailable")
@@ -385,7 +454,35 @@ def _run_suite(
     )
     n_failed = 0
 
-    for split_id, split in concrete_splits:
+    # DA/DG suites are gated: they never execute unless tasks 1-3 are
+    # marked ready in the profile AND the source environments actually
+    # exist under the active gesture set. Refusing a multi-environment
+    # method when only one training environment exists uses the exact
+    # wording "insufficient source environments" from the task spec.
+    domain_arm_gates: dict[str, da_mod.GateReport] = {}
+    if suite.kind == "domain_learning":
+        source_envs = _source_environments_for_suite(
+            records, gesture_set,
+        )
+        for arm_name in suite.arms:
+            try:
+                arm_spec = da_mod.get(arm_name)
+            except KeyError:
+                domain_arm_gates[arm_name] = da_mod.GateReport(
+                    ok=False,
+                    reason=f"unknown domain arm {arm_name!r}",
+                    n_source_environments=0,
+                    has_unlabelled_target=False,
+                )
+                continue
+            domain_arm_gates[arm_name] = da_mod.gate(
+                arm_spec,
+                source_environments=source_envs,
+                has_unlabelled_target=bool(suite.dfs_bins) or True,
+                tasks_1_3_ready=profile.tasks_1_3_ready,
+            )
+
+    for split_id, split in dedup_result.canonical:
         try:
             X_tr, y_tr, sids_tr = features_mod.slice_bundle(bundle, split.train_ids)
             X_va, y_va, _ = features_mod.slice_bundle(bundle, split.val_ids)
@@ -413,6 +510,27 @@ def _run_suite(
         X_va_s = sc.transform(X_va).astype(np.float32)
         X_te_s = sc.transform(X_te).astype(np.float32)
         n_classes = int(np.unique(bundle.y).size)
+
+        # Per-split chance + majority baselines under the ACTIVE gesture
+        # set. Never inherited across variants — every split records its
+        # own baseline computed on this test fold. Also record a
+        # source-vs-target feature-statistic shift diagnostic; the fit
+        # is train-fold only.
+        baseline_payload = gs_mod.per_split_baseline(y_te.tolist(), gesture_set)
+        feature_shift = collapse_mod.compute_feature_shift_stats(X_tr, X_te)
+        baseline_out = layout.summaries / "per_split_baselines" / f"{split_id}.json"
+        baseline_out.parent.mkdir(parents=True, exist_ok=True)
+        baseline_out.write_text(json.dumps(
+            {
+                "suite": suite.name, "split_id": split_id, "kind": split.kind,
+                "n_test": int(len(split.test_ids)),
+                "n_train": int(len(split.train_ids)),
+                "n_val": int(len(split.val_ids)),
+                "gesture_set": gesture_set.to_dict(),
+                "baseline": baseline_payload,
+                "feature_shift": feature_shift,
+            }, indent=2, sort_keys=True,
+        ), encoding="utf-8")
 
         # LOUD cross-domain label-mapping check. Reads the split kind
         # from the persisted split object so it stays in lockstep with
@@ -446,6 +564,60 @@ def _run_suite(
             continue
 
         for arm_name in suite.arms:
+            # Domain-adaptation arms are gated; if the gate refuses,
+            # enrol an ``unavailable`` row per (arm, seed) with the exact
+            # refusal reason and skip execution entirely. These arms are
+            # not registered in ``arms.py`` and would otherwise raise.
+            if suite.kind == "domain_learning":
+                gate = domain_arm_gates.get(arm_name)
+                if gate is None or not gate.ok:
+                    reason = (
+                        f"domain-learning arm {arm_name!r} refused: "
+                        f"{gate.reason if gate else 'no gate report'}"
+                    )
+                    log(f"[suite:{suite.name}][{split_id}][{arm_name}] "
+                        f"UNAVAILABLE: {reason}")
+                    for seed in seeds:
+                        exp_dir = layout.experiment_dir(
+                            suite.name, split_id, arm_name, seed,
+                        )
+                        exp_dir.mkdir(parents=True, exist_ok=True)
+                        status_mod.write_status(
+                            exp_dir / "status.json",
+                            status="unavailable", reason=reason,
+                        )
+                        rows.append({
+                            "suite": suite.name, "split_id": split_id,
+                            "arm": arm_name, "seed": seed,
+                            "status": "unavailable", "reason": reason,
+                        })
+                    continue
+                # Even when gated OK we do not yet have the training
+                # loop wired in (task 8: "prepare, do not yet run").
+                # Enrol as unavailable with that exact reason so it is
+                # discoverable in summaries but nothing executes.
+                reason = (
+                    "domain-adaptation training loop not enabled in this "
+                    "profile (task 8: prepare, do not yet run). Gate passed "
+                    f"with n_source_environments={gate.n_source_environments}, "
+                    f"has_unlabelled_target={gate.has_unlabelled_target}."
+                )
+                for seed in seeds:
+                    exp_dir = layout.experiment_dir(
+                        suite.name, split_id, arm_name, seed,
+                    )
+                    exp_dir.mkdir(parents=True, exist_ok=True)
+                    status_mod.write_status(
+                        exp_dir / "status.json",
+                        status="unavailable", reason=reason,
+                    )
+                    rows.append({
+                        "suite": suite.name, "split_id": split_id,
+                        "arm": arm_name, "seed": seed,
+                        "status": "unavailable", "reason": reason,
+                    })
+                continue
+
             spec = arms_mod.get_arm(arm_name)
             # Match arm and suite feature intent so nothing is mis-wired.
             # Synthetic bundles bypass the check — the fixture is intentionally
@@ -595,6 +767,41 @@ def _build_manifest(
     return kept
 
 
+def _source_environments_for_suite(
+    records: Sequence[manifest_mod.RecordingRecord],
+    gesture_set: "gs_mod.GestureSet",
+) -> list[str]:
+    """Environment := (room, date). Used for DA/DG gating."""
+    active = set(gesture_set.ids)
+    envs: set[tuple[int, str]] = set()
+    for r in records:
+        if r.gesture in active:
+            envs.add((int(r.room), str(r.date)))
+    return sorted(f"room{r}_date{d}" for r, d in envs)
+
+
+def _write_gesture_set_manifest(
+    layout: paths_mod.RunLayout,
+    gesture_set: "gs_mod.GestureSet",
+    inventory: "inventory_mod.RoomDateInventory",
+) -> Path:
+    """Persist the active gesture set and inventory as a summary artefact.
+
+    Kept OUT of ``layout.splits/`` so the RUN_SUMMARY split-listing does
+    not treat it as an ordinary split JSON.
+    """
+    out = layout.summaries / "gesture_set_and_inventory.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "gesture_set": gesture_set.to_dict(),
+        "inventory": inventory.to_dict(),
+    }
+    out.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8",
+    )
+    return out
+
+
 def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="MetaAI evaluation orchestrator")
     ap.add_argument("--profile", type=str, default=None,
@@ -638,7 +845,11 @@ def run(argv: list[str] | None = None) -> int:
     if profile.use_synthetic:
         log("[run] LABEL: synthetic fixture — NOT scientific results.")
 
-    _write_resolved_config(layout, profile, args)
+    gesture_set = gs_mod.GestureSet.from_config(profile.gesture_set)
+    log(f"[gesture-set] active={gesture_set.label} "
+        f"ids={list(gesture_set.ids)} n_classes={gesture_set.n_classes} "
+        f"chance={gesture_set.chance_level:.4f}")
+    _write_resolved_config(layout, profile, args, gesture_set=gesture_set)
     provenance.write_environment_txt(layout.environment)
 
     # Resume config check: refuse if resolved_config diverges materially.
@@ -686,15 +897,34 @@ def run(argv: list[str] | None = None) -> int:
                                  reason=f"manifest: {e}")
         return 2
 
+    # Filter records by the active gesture set BEFORE building any
+    # feature bundle or split. Chance and majority baselines below are
+    # computed on this filtered set only.
+    n_before = len(records)
+    records = gs_mod.filter_records(records, gesture_set)
+    log(f"[gesture-set] filter: kept {len(records)}/{n_before} recordings "
+        f"under ids={list(gesture_set.ids)}")
+
+    inventory = inventory_mod.build_inventory(records, gesture_set.ids)
+    _write_gesture_set_manifest(layout, gesture_set, inventory)
+    log(f"[inventory] rooms={inventory.rooms_seen} "
+        f"dates_per_room={inventory.dates_per_room} "
+        f"same_room_diff_date_available={inventory.same_room_diff_date_available}")
+    if not inventory.same_room_diff_date_available:
+        log(f"[inventory] {inventory.same_room_diff_date_reason}")
+
     all_rows: list[dict] = []
     total_failed = 0
     total_required_failed = 0
+    dedup_state: dict[str, dedup_mod.DedupResult] = {}
     for suite in profile.suites:
         log(f"[suite:{suite.name}] required={suite.required} arms={suite.arms}")
         rows, n_failed = _run_suite(
             suite, profile, records, layout,
             seeds=list(profile.seeds), device_pref=args.device,
             log=log, force=args.force,
+            gesture_set=gesture_set,
+            dedup_state=dedup_state,
         )
         all_rows.extend(rows)
         total_failed += n_failed
@@ -703,13 +933,39 @@ def run(argv: list[str] | None = None) -> int:
 
     _write_summaries(layout, all_rows)
 
+    # Persist the dedup / alias report so the RUN_SUMMARY can distinguish
+    # unique experiments from executed rows.
+    dedup_payload = {
+        suite_name: state.to_manifest_dict()
+        for suite_name, state in dedup_state.items()
+    }
+    (layout.summaries / "split_dedup.json").write_text(
+        json.dumps(dedup_payload, indent=2, sort_keys=True), encoding="utf-8",
+    )
+
     counts = {"pending": 0, "running": 0, "completed": 0,
-              "failed": 0, "unavailable": 0}
+              "failed": 0, "unavailable": 0, "alias_of": 0}
     for r in all_rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
 
+    unique_counts = {"unique_completed": 0, "executed_rows": 0}
+    for r in all_rows:
+        if r["status"] == "completed":
+            unique_counts["executed_rows"] += 1
+            state = dedup_state.get(r["suite"])
+            canonical_ids = (
+                {sid for sid, _ in state.canonical} if state else set()
+            )
+            if r["split_id"] in canonical_ids:
+                unique_counts["unique_completed"] += 1
+    counts["unique_completed"] = unique_counts["unique_completed"]
+    counts["executed_rows"] = unique_counts["executed_rows"]
+
     payload = json.loads(layout.run_manifest.read_text(encoding="utf-8"))
     payload["counts"] = counts
+    payload["gesture_set"] = gesture_set.to_dict()
+    payload["inventory"] = inventory.to_dict()
+    payload["dedup"] = dedup_payload
     payload["ended_at"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     layout.run_manifest.write_text(
         json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8",

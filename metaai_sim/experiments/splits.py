@@ -423,6 +423,92 @@ def cross_room(
     )
 
 
+def same_room_different_date(
+    records: Sequence[RecordingRecord],
+    room: int,
+    train_date: str,
+    test_date: str,
+    *,
+    val_frac: float = 0.15,
+    seed: int = 42,
+    restrict_gestures: bool = True,
+    split_id: str | None = None,
+) -> Split:
+    """Train/val on ``train_date`` (grouped) in ``room``, test on
+    ``test_date`` in the same ``room``.
+
+    Answers the room-vs-session question the packaged Widar3.0 tree can
+    otherwise never separate. Fails LOUDLY if the two dates are not in
+    the same room, or if either date is empty, or if the label sets are
+    disjoint under the caller's records.
+    """
+    if train_date == test_date:
+        raise InvalidSplitError("train_date == test_date")
+    idx = _idx_by_sample_id(records)
+    train_pool = [r for r in records if r.date == train_date and r.room == room]
+    test_pool = [r for r in records if r.date == test_date and r.room == room]
+    if not train_pool:
+        raise InvalidSplitError(
+            f"no records for train_date={train_date} room={room}"
+        )
+    if not test_pool:
+        raise InvalidSplitError(
+            f"no records for test_date={test_date} room={room}"
+        )
+    # Confirm the two dates really are in the same room in the manifest.
+    train_rooms = {r.room for r in train_pool}
+    test_rooms = {r.room for r in test_pool}
+    if train_rooms != {room} or test_rooms != {room}:
+        raise InvalidSplitError(
+            f"same_room_different_date: room mismatch "
+            f"(train_rooms={sorted(train_rooms)}, test_rooms={sorted(test_rooms)})"
+        )
+
+    if restrict_gestures:
+        common = {r.gesture for r in train_pool} & {r.gesture for r in test_pool}
+        if not common:
+            raise InvalidSplitError(
+                f"no gestures common to dates {train_date} and {test_date} "
+                f"in room {room}"
+            )
+        train_pool = [r for r in train_pool if r.gesture in common]
+        test_pool = [r for r in test_pool if r.gesture in common]
+
+    group_to_ids: dict[str, list[str]] = defaultdict(list)
+    for r in train_pool:
+        group_to_ids[r.group_id].append(r.sample_id)
+    ordered = _shuffle_stratified_by_gesture(idx, group_to_ids, seed)
+    n = len(ordered)
+    n_val = max(1, int(round(n * val_frac)))
+    if n_val >= n:
+        raise InvalidSplitError(
+            f"same_room_different_date: {n} source groups — "
+            f"cannot spare {n_val} for val"
+        )
+    val_groups = set(ordered[:n_val])
+    train_groups = set(ordered[n_val:])
+    train_ids = [s for g in sorted(train_groups) for s in sorted(group_to_ids[g])]
+    val_ids = [s for g in sorted(val_groups) for s in sorted(group_to_ids[g])]
+    test_ids = sorted(r.sample_id for r in test_pool)
+
+    return _finalize(
+        idx, kind="same_room_different_date", grouping_key="group_id",
+        train_ids=train_ids, val_ids=val_ids, test_ids=test_ids,
+        notes={
+            "room": room,
+            "train_date": train_date, "test_date": test_date,
+            "room_date_confound": False,
+            "same_room_diff_date": True,
+            "gestures_common": sorted(
+                {r.gesture for r in train_pool}
+                & {r.gesture for r in test_pool}
+            ),
+            "seed": seed, "val_frac": val_frac,
+        },
+        split_id=split_id,
+    )
+
+
 def leave_one_room_out(
     records: Sequence[RecordingRecord],
     held_out_room: int,

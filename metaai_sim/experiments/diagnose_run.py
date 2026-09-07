@@ -632,36 +632,90 @@ def write_report(run_root: Path, out: Path | None = None) -> Path:
                 f"{_fmt_pct(e['accuracy_vs_baseline']):>10}  "
                 f"{_fmt_dict({int(k): v for k, v in b['class_support'].items()})}"
             )
-        # Add a label-shuffle null control for the highest-accuracy
-        # cross-domain arm we can find.
+        # Statistical reporting corrections (task 5). The earlier
+        # single-max shuffle null was selection-biased. We now report,
+        # per cross-domain row: an individual shuffle-null p-value, its
+        # BH-FDR and Holm-Bonferroni adjusted variants, and an
+        # honestly-labelled maximum-statistic null so a post-hoc pick
+        # can be compared without lying about it. The pre-specified
+        # primary comparison (see experiments/stats.py) is annotated
+        # separately.
+        from experiments import stats as stats_mod
         cross = [e for e in entries if e.get("split_kind") in label_audit.CROSS_DOMAIN_KINDS]
         if cross:
-            e = max(cross, key=lambda x: x["observed_accuracy"])
-            pth = (run_root / "experiments" / e["suite"] / e["split_id"]
-                   / e["arm"] / f"seed_{e['seed']}" / "predictions"
-                   / "test_predictions.csv")
-            pair = _load_predictions_csv(pth)
-            if pair is not None:
+            raw_rows: list[dict] = []
+            pairs: list[tuple[np.ndarray, np.ndarray]] = []
+            for e in cross:
+                pth = (run_root / "experiments" / e["suite"] / e["split_id"]
+                       / e["arm"] / f"seed_{e['seed']}" / "predictions"
+                       / "test_predictions.csv")
+                pair = _load_predictions_csv(pth)
+                if pair is None:
+                    continue
                 y_t, y_p = pair
-                null = M.label_shuffle_baseline(
+                null = stats_mod.shuffle_null(
                     y_t, y_p, n_permutations=1000, seed=0,
+                )
+                raw_rows.append({
+                    "row": e,
+                    "p": null.p_value_ge_observed,
+                    "observed": null.observed_accuracy,
+                    "null_mean": null.null_mean,
+                    "null_std": null.null_std,
+                })
+                pairs.append((y_t, y_p))
+            if raw_rows:
+                p_values = [r["p"] for r in raw_rows]
+                bh = stats_mod.benjamini_hochberg(p_values)
+                holm = stats_mod.holm_bonferroni(p_values)
+                max_null = stats_mod.max_statistic_null(
+                    pairs, n_permutations=1000, seed=0,
                 )
                 lines.append("")
                 lines.append(
-                    f"Label-shuffle null on the highest-accuracy cross-domain "
-                    f"row ({e['direction']} / {e['arm']} / seed={e['seed']}):"
+                    "Per-row shuffle-null p-values with multiple-comparison "
+                    "correction. Deterministic replicates count as ONE "
+                    "measurement; effect sizes are given in accuracy points."
                 )
                 lines.append(
-                    f"- observed_accuracy: {_fmt_pct(null['observed_accuracy'])}"
+                    f"{'direction':<24} {'arm':<20} {'seed':>4}  "
+                    f"{'obs':>8} {'null_mu':>8} {'p_raw':>7} "
+                    f"{'p_BH':>7} {'p_Holm':>7} "
+                    f"{'delta_pp_vs_chance':>18}"
+                )
+                for i, r in enumerate(raw_rows):
+                    e = r["row"]
+                    n_cls = e.get("n_classes_in_task") \
+                        or max(len(e.get("per_class_recall", {})), 1)
+                    chance = 1.0 / n_cls
+                    delta = (r["observed"] - chance) * 100
+                    lines.append(
+                        f"{e['direction'][:24]:<24} {e['arm'][:20]:<20} "
+                        f"{e['seed']:>4}  "
+                        f"{r['observed'] * 100:7.2f}% "
+                        f"{r['null_mean'] * 100:7.2f}% "
+                        f"{r['p']:7.4f} "
+                        f"{bh[i]:7.4f} "
+                        f"{holm[i]:7.4f} "
+                        f"{delta:>+17.2f}pp"
+                    )
+                lines.append("")
+                lines.append(
+                    "Maximum-statistic null (post-hoc-selection honest): "
+                    f"observed_max={_fmt_pct(max_null['observed_max'])}  "
+                    f"null_mean={_fmt_pct(max_null['null_mean'])}  "
+                    f"P(max_null >= observed_max)={max_null['p_value_ge_observed']:.4f}"
                 )
                 lines.append(
-                    f"- shuffled mean +/- std: "
-                    f"{_fmt_pct(null['mean'])} +/- {_fmt_pct(null['std'])}"
+                    "PRIMARY comparisons are pre-registered in "
+                    "experiments/stats.PRIMARY_COMPARISONS; all other rows "
+                    "are EXPLORATORY and must be labelled as such downstream."
                 )
                 lines.append(
-                    f"- P(shuffled >= observed) over "
-                    f"{null['n_permutations']} permutations: "
-                    f"{null['p_value_ge_observed']:.4f}"
+                    "GUARDRAIL: any result within +/- "
+                    f"{stats_mod.AT_CHANCE_TOLERANCE * 100:.0f} accuracy "
+                    "points of 1/K is NEVER reported as a significant "
+                    "finding regardless of p-value."
                 )
         lines.append("")
 
@@ -752,11 +806,19 @@ def write_report(run_root: Path, out: Path | None = None) -> Path:
                 )
             lines.append("")
         lines.append(
-            "Historical single-room validation result: 92.80%. That number "
-            "was measured under a non-grouped random split; the current "
-            "``indomain_grouped`` splits enforce recording-grouped folds "
-            "(``experiments/splits.py``), so any in-domain drop here is "
-            "attributable to the stricter grouping, not to the model."
+            "Historical single-room validation result: 92.80%. Three "
+            "factors changed together between that measurement and the "
+            "current in-domain runs, so the drop cannot be attributed to "
+            "any one of them without a controlled comparison:\n"
+            "  1. Class count: 5 -> 6 (chance moves from 20% to 16.67%).\n"
+            "  2. Users included: [2, 3] -> [1, 2, 3].\n"
+            "  3. Split policy: non-grouped random -> recording-grouped folds "
+            "(experiments/splits.py::indomain_grouped).\n"
+            "Repository does not yet reconstruct the earlier configuration "
+            "with byte-identical inputs; the old and new numbers are NOT "
+            "presented here as a controlled comparison. When a "
+            "``historical_replication`` profile is added later, this note "
+            "will be replaced by that one-factor-at-a-time result."
         )
     lines.append("")
 
