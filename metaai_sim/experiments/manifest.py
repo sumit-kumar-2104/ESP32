@@ -57,10 +57,17 @@ QUALITY_OK = "ok"
 QUALITY_MISSING_RECEIVERS = "missing_receivers"
 QUALITY_MALFORMED = "malformed"
 QUALITY_ZERO_PACKETS = "zero_packets"
+QUALITY_ZERO_BYTES = "zero_bytes"
 QUALITY_SHORT = "short"
 
 REJECT_POLICIES = ("reject", "retain_with_mask", "keep_as_is")
 PREPROCESSING_VERSION = "v1"
+
+# SHA-256 of the empty byte string is
+# e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+# so every 0-byte file collides at this 16-hex prefix and would trigger a
+# spurious file-hash overlap in the split checker. Exclude it explicitly.
+EMPTY_FILE_HASH_16 = "e3b0c44298fc1c14"
 
 
 @dataclass(frozen=True)
@@ -137,12 +144,16 @@ def _classify(
     receivers_present: list[int],
     packet_counts: dict[str, int],
     errors: dict[str, str],
+    file_sizes: dict[str, int],
     *,
     min_packets: int,
 ) -> tuple[str, str]:
     """Return (quality, detail)."""
     all_rx = set(range(1, 7))
     missing = sorted(all_rx - set(receivers_present))
+    zero_size = sorted(k for k, v in file_sizes.items() if v == 0)
+    if zero_size:
+        return QUALITY_ZERO_BYTES, f"zero_byte_receivers={zero_size}"
     if errors:
         joined = "; ".join(f"{k}: {v}" for k, v in sorted(errors.items()))
         return QUALITY_MALFORMED, joined
@@ -209,8 +220,16 @@ def walk_raw_csi(
             except OSError as e:
                 errors[rx_key] = f"io: {e}"
                 continue
-            hashes[rx_key] = h
             sizes[rx_key] = size
+            # 0-byte files all share the empty-string SHA-256 prefix
+            # (e3b0c44298fc1c14). Recording it as a real content hash
+            # would fabricate a bogus cross-recording collision, so we
+            # keep the size for diagnostics but drop the hash and mark
+            # the receiver as errored.
+            if size == 0 or h == EMPTY_FILE_HASH_16:
+                errors[rx_key] = f"zero-byte file: {p}"
+                continue
+            hashes[rx_key] = h
             if read_packet_counts:
                 n_pkt, err = _read_packet_count(p)
                 packets[rx_key] = n_pkt
@@ -219,7 +238,8 @@ def walk_raw_csi(
             else:
                 packets[rx_key] = -1
         quality, detail = _classify(
-            receivers_present, packets, errors, min_packets=min_packets,
+            receivers_present, packets, errors, sizes,
+            min_packets=min_packets,
         )
         rec = RecordingRecord(
             sample_id=_stable_sample_id(recording_id, hashes),

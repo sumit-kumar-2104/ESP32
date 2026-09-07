@@ -130,11 +130,17 @@ def _run_checks(
             )
 
     # (d) Content-hash overlap catches literal-duplicate recordings that
-    #     somehow ended up under distinct group_ids.
+    #     somehow ended up under distinct group_ids. The empty-file SHA
+    #     prefix is ignored — every 0-byte file collides at that value
+    #     and would produce spurious leakage warnings.
+    from experiments.manifest import EMPTY_FILE_HASH_16
+
     def _hashes(ids: Sequence[str]) -> set[str]:
         s: set[str] = set()
         for sid in ids:
             for h in idx[sid].file_hashes.values():
+                if h == EMPTY_FILE_HASH_16:
+                    continue
                 s.add(h)
         return s
 

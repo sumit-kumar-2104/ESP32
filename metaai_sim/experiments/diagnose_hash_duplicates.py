@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments import paths as paths_mod
+from experiments.manifest import EMPTY_FILE_HASH_16
 
 
 def _resolve_manifest(arg: str) -> Path:
@@ -47,21 +48,28 @@ def _resolve_manifest(arg: str) -> Path:
 def diagnose(manifest_path: Path) -> dict:
     """Return a report dict; caller may also print it."""
     hash_to_owners: dict[str, list[dict]] = defaultdict(list)
+    zero_byte_files: list[dict] = []
     with manifest_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
+            file_sizes = rec.get("file_sizes") or {}
             for rx_key, h in (rec.get("file_hashes") or {}).items():
-                hash_to_owners[h].append({
+                owner = {
                     "hash": h,
                     "rx": rx_key,
                     "date": rec.get("date"),
                     "room": rec.get("room"),
                     "recording_id": rec.get("recording_id"),
                     "file_path": (rec.get("file_paths") or {}).get(rx_key),
-                })
+                    "size": file_sizes.get(rx_key),
+                }
+                if h == EMPTY_FILE_HASH_16 or owner["size"] == 0:
+                    zero_byte_files.append(owner)
+                    continue
+                hash_to_owners[h].append(owner)
     duplicates = {h: owners for h, owners in hash_to_owners.items() if len(owners) > 1}
     cross_date: dict[str, list[dict]] = {}
     cross_room: dict[str, list[dict]] = {}
@@ -84,6 +92,8 @@ def diagnose(manifest_path: Path) -> dict:
         "n_cross_date": len(cross_date),
         "n_cross_room": len(cross_room),
         "n_same_recording_extra_rx": len(same_recording),
+        "n_zero_byte_files": len(zero_byte_files),
+        "zero_byte_files": zero_byte_files,
         "cross_date": cross_date,
         "cross_room": cross_room,
         "same_recording_extra_rx": same_recording,
@@ -98,7 +108,19 @@ def print_report(report: dict, *, max_rows: int = 20) -> None:
     print(f"  cross-date duplicates:   {report['n_cross_date']}")
     print(f"  cross-room duplicates:   {report['n_cross_room']}")
     print(f"  same-recording extras:   {report['n_same_recording_extra_rx']}")
+    print(f"zero-byte receiver files:  {report['n_zero_byte_files']}"
+          f"  (excluded from hash collision counts)")
     print()
+    if report["zero_byte_files"]:
+        print("=== ZERO-BYTE receiver files (data-quality, not leakage) ===")
+        for i, o in enumerate(report["zero_byte_files"][:max_rows]):
+            print(f"  date={o['date']} room={o['room']} rec={o['recording_id']} "
+                  f"rx={o['rx']} size={o['size']}")
+            print(f"    {o['file_path']}")
+        remaining = len(report["zero_byte_files"]) - max_rows
+        if remaining > 0:
+            print(f"  ... {remaining} more (pass --max-rows to see them)")
+        print()
     for label, key in (
         ("CROSS-DATE duplicates (leakage risk)", "cross_date"),
         ("CROSS-ROOM duplicates (leakage risk)", "cross_room"),
