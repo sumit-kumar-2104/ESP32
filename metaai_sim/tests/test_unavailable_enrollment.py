@@ -117,3 +117,105 @@ def test_summary_index_records_reason(tmp_path):
                ).read_text(encoding="utf-8")
     assert "unavailable" in idx_csv
     assert "split unavailable" in idx_csv
+
+
+def _write_feature_mismatch_profile(dst: Path) -> Path:
+    """Reference an arm whose feature_mode does not match the suite.
+
+    ``logreg_raw`` is registered with ``feature_mode='raw'``. Putting it
+    inside a ``feature_mode: dfs_spec`` suite must NOT silently skip it —
+    the runner must enrol an ``unavailable`` row for every (seed).
+    """
+    profile = {
+        "name": "mismatch",
+        "label": "test fixture — arm/suite feature_mode mismatch",
+        "use_synthetic": False,
+        "dates": [],
+        "seeds": [42, 43],
+        "quality_policy": "reject",
+        "min_packets": 8,
+        "read_packet_counts": False,
+        "suites": [{
+            "name": "mismatch_suite",
+            "required": False,
+            "kind": "dfs_debug",
+            "feature_mode": "dfs_spec",
+            "arms": ["logreg_raw"],   # raw != dfs_spec
+            "splits": [{
+                "kind": "indomain_grouped",
+                "id": "mismatch_split",
+                "date": "20181109",
+                "val_frac": 0.2,
+                "test_frac": 0.2,
+                "seed": 42,
+            }],
+        }],
+    }
+    dst.write_text(yaml.safe_dump(profile, sort_keys=True), encoding="utf-8")
+    return dst
+
+
+def test_feature_mode_mismatch_enrols_unavailable(tmp_path, monkeypatch):
+    """A configured-but-mismatched arm was silently skipped before the fix.
+
+    We patch the manifest builder + feature builder to bypass the raw-CSI
+    dataset requirement while keeping ``bundle.is_synthetic = False`` so
+    the runner treats the mismatch as production code would.
+    """
+    from experiments import features as features_mod
+    from experiments import runner as runner_mod
+
+    records, bundle = features_mod.synthetic_fixture()
+    # Overwrite the flag so the runner's mismatch guard is exercised.
+    bundle_non_synth = features_mod.FeatureBundle(
+        X=bundle.X, y=bundle.y, sample_ids=bundle.sample_ids,
+        group_ids=bundle.group_ids, gestures_raw=bundle.gestures_raw,
+        class_index_to_gesture=bundle.class_index_to_gesture,
+        feature_mode="dfs_spec", dfs_bins="full", is_synthetic=False,
+    )
+    # Force the fixture date into the profile.
+    fixture_date = records[0].date
+    profile_path = tmp_path / "mismatch.yaml"
+    profile_dict = yaml.safe_load(
+        _write_feature_mismatch_profile(profile_path).read_text(encoding="utf-8"),
+    )
+    profile_dict["suites"][0]["splits"][0]["date"] = fixture_date
+    profile_path.write_text(yaml.safe_dump(profile_dict, sort_keys=True),
+                            encoding="utf-8")
+
+    def _fake_manifest(profile, layout, log):
+        from experiments import manifest as manifest_mod
+        manifest_mod.write_manifest(
+            layout.data_audit, records, rejections=[],
+            feature_mode="dfs_spec", dfs_bins="full",
+        )
+        return records
+
+    def _fake_bundle(profile, records_, feature_mode, dfs_bins, log):
+        return bundle_non_synth
+
+    monkeypatch.setattr(runner_mod, "_build_manifest", _fake_manifest)
+    monkeypatch.setattr(runner_mod, "_build_feature_bundle", _fake_bundle)
+
+    rc = runner_mod.run([
+        "--profile", str(profile_path),
+        "--device", "cpu",
+        "--results-root", str(tmp_path),
+        "--run-id", "mismatch-run",
+    ])
+    assert rc == 0, "optional-suite mismatch must not flip the exit code"
+
+    root = tmp_path / "mismatch-run"
+    manifest = _load_manifest(root / "run_manifest.json")
+    # Two seeds x one split x one arm = 2 unavailable rows must be recorded.
+    assert manifest["counts"]["unavailable"] == 2
+    assert manifest["counts"]["completed"] == 0
+    for seed in (42, 43):
+        exp_status = (
+            root / "experiments" / "mismatch_suite" / "mismatch_split"
+            / "logreg_raw" / f"seed_{seed}" / "status.json"
+        )
+        assert exp_status.exists(), f"missing enrollment for seed={seed}"
+        payload = status.read_status(exp_status)
+        assert payload["status"] == "unavailable"
+        assert "feature_mode" in payload["reason"]

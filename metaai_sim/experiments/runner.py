@@ -414,15 +414,63 @@ def _run_suite(
         X_te_s = sc.transform(X_te).astype(np.float32)
         n_classes = int(np.unique(bundle.y).size)
 
+        # LOUD cross-domain label-mapping check. Reads the split kind
+        # from the persisted split object so it stays in lockstep with
+        # what actually got materialised.
+        from experiments import label_audit
+        try:
+            label_audit.assert_cross_domain_class_maps_agree(
+                split.kind,
+                bundle.class_index_to_gesture,
+                None,
+                y_tr, y_te,
+                split_id=split_id,
+            )
+        except label_audit.ClassMapMismatch as e:
+            log(f"[label-audit] FAIL {suite.name}/{split_id}: {e}")
+            for arm_name in suite.arms:
+                for seed in seeds:
+                    exp_dir = layout.experiment_dir(suite.name, split_id, arm_name, seed)
+                    exp_dir.mkdir(parents=True, exist_ok=True)
+                    status_mod.write_status(
+                        exp_dir / "status.json",
+                        status="failed",
+                        reason=f"class-map mismatch: {e}",
+                    )
+                    rows.append({
+                        "suite": suite.name, "split_id": split_id,
+                        "arm": arm_name, "seed": seed, "status": "failed",
+                        "reason": f"class-map mismatch: {e}",
+                    })
+                    n_failed += 1
+            continue
+
         for arm_name in suite.arms:
             spec = arms_mod.get_arm(arm_name)
             # Match arm and suite feature intent so nothing is mis-wired.
             # Synthetic bundles bypass the check — the fixture is intentionally
             # feature-agnostic so we can exercise every arm's plumbing.
             if not bundle.is_synthetic and spec.feature_mode != suite.feature_mode:
-                log(f"[suite:{suite.name}][{split_id}][{arm_name}] "
+                reason = (
                     f"arm feature_mode={spec.feature_mode!r} != suite "
-                    f"feature_mode={suite.feature_mode!r} — skipping arm.")
+                    f"feature_mode={suite.feature_mode!r}"
+                )
+                log(f"[suite:{suite.name}][{split_id}][{arm_name}] "
+                    f"UNAVAILABLE: {reason}")
+                for seed in seeds:
+                    exp_dir = layout.experiment_dir(
+                        suite.name, split_id, arm_name, seed,
+                    )
+                    exp_dir.mkdir(parents=True, exist_ok=True)
+                    status_mod.write_status(
+                        exp_dir / "status.json",
+                        status="unavailable", reason=reason,
+                    )
+                    rows.append({
+                        "suite": suite.name, "split_id": split_id,
+                        "arm": arm_name, "seed": seed,
+                        "status": "unavailable", "reason": reason,
+                    })
                 continue
 
             for seed in seeds:
