@@ -1,0 +1,147 @@
+# Reproduction profile — CNN-GRU on structure-preserving tensor features.
+#
+# Trains the paper's CNN-GRU backbone on each 3-D representation
+# (csi_tensor / dfs_tensor / bvp_tensor), on the SAME splits the flat
+# harness already exercises. Every number that ends up in
+# summaries/reproduction_report.md is computed from persisted
+# predictions/test.json — never hard-coded.
+#
+# References (Zheng et al., MobiSys 2019, Section 6.4 + Figure 19):
+#   csi_tensor : 40.2% in-domain
+#   dfs_tensor : 77.8% in-domain
+#   bvp_tensor : 92.4% in-domain
+#
+# HARD RULE: no hyperparameter here has been tuned to hit those numbers.
+# Reaching >= 80% of a reference is treated as reproduction; a shortfall
+# is stated verbatim in the report, not hidden.
+
+name: repro
+label: "reproduction: CNN-GRU on csi/dfs/bvp tensors, existing splits"
+use_synthetic: false
+dates: ["20181109", "20181118"]
+seeds: [42, 43, 44]
+quality_policy: reject
+min_packets: 64
+read_packet_counts: false
+
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: "matches core profile; see docs/gesture_set_evidence.md"
+  evidence: "docs/gesture_set_evidence.md"
+
+tasks_1_3_ready: false
+
+suites:
+  # ─── csi_tensor ────────────────────────────────────────────────────────
+  - name: repro_csi_tensor
+    required: false
+    kind: reproduction
+    feature_mode: csi_tensor
+    tensor_T: 32
+    variable_length_policy: linear_resample
+    reference_accuracy: 40.2
+    arms:
+      - cnn_gru_csi_tensor
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: held_out_date
+        id: heldout_test_20181118
+        train_dates: ["20181109"]
+        test_date: "20181118"
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_2_to_1
+        source_room: 2
+        target_room: 1
+        val_frac: 0.15
+        seed: 42
+
+  # ─── dfs_tensor ────────────────────────────────────────────────────────
+  - name: repro_dfs_tensor
+    required: false
+    kind: reproduction
+    feature_mode: dfs_tensor
+    tensor_T: 32
+    tensor_F: 16
+    variable_length_policy: linear_resample
+    reference_accuracy: 77.8
+    arms:
+      - cnn_gru_dfs_tensor
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: held_out_date
+        id: heldout_test_20181118
+        train_dates: ["20181109"]
+        test_date: "20181118"
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_2_to_1
+        source_room: 2
+        target_room: 1
+        val_frac: 0.15
+        seed: 42
+
+  # ─── bvp_tensor ────────────────────────────────────────────────────────
+  # Marked NOT required because Widar3.0 BVP .mat files are a separate
+  # download. If METAAI_BVP_DIR (or <data>/widar3/BVP) is missing, the
+  # runner enrols every arm here as `unavailable` with the exact reason,
+  # never substituting an approximation.
+  - name: repro_bvp_tensor
+    required: false
+    kind: reproduction
+    feature_mode: bvp_tensor
+    tensor_t0: 20
+    variable_length_policy: linear_resample
+    reference_accuracy: 92.4
+    arms:
+      - cnn_gru_bvp_tensor
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: held_out_date
+        id: heldout_test_20181118
+        train_dates: ["20181109"]
+        test_date: "20181118"
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_2_to_1
+        source_room: 2
+        target_room: 1
+        val_frac: 0.15
+        seed: 42

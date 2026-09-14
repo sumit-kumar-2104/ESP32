@@ -53,6 +53,7 @@ from experiments import provenance
 from experiments import report as report_mod
 from experiments import splits as splits_mod
 from experiments import status as status_mod
+from experiments import tensor_features as tensor_mod
 
 
 # ─── Config loading ─────────────────────────────────────────────────────────
@@ -66,6 +67,18 @@ class ProfileSuite:
     splits: list[dict[str, Any]] = field(default_factory=list)
     feature_mode: str = "raw"
     dfs_bins: str = "full"
+    # Tensor knobs (only used when feature_mode in TENSOR_FEATURE_MODES).
+    tensor_T: int = tensor_mod.CSI_TENSOR_T_DEFAULT
+    tensor_F: int = tensor_mod.DFS_TENSOR_F_DEFAULT
+    tensor_t0: int = tensor_mod.BVP_TENSOR_T0_DEFAULT
+    variable_length_policy: str = "linear_resample"
+    # Reproduction-gate reference numbers (Widar3.0 Sec 6.4 + Fig 19).
+    # Never used to tune — only echoed into summaries so gap tables are honest.
+    reference_accuracy: float | None = None
+    # ota_ablation gate: refuse to run this suite unless the given
+    # ``requires_repro`` suite (in the same run) already contains a
+    # completed cnn_gru arm for this feature mode.
+    requires_repro: str | None = None
 
 
 @dataclass
@@ -100,6 +113,17 @@ def load_profile(path: Path) -> Profile:
             splits=list(s.get("splits", [])),
             feature_mode=s.get("feature_mode", "raw"),
             dfs_bins=s.get("dfs_bins", "full"),
+            tensor_T=int(s.get("tensor_T", tensor_mod.CSI_TENSOR_T_DEFAULT)),
+            tensor_F=int(s.get("tensor_F", tensor_mod.DFS_TENSOR_F_DEFAULT)),
+            tensor_t0=int(s.get("tensor_t0", tensor_mod.BVP_TENSOR_T0_DEFAULT)),
+            variable_length_policy=str(
+                s.get("variable_length_policy", "linear_resample")
+            ),
+            reference_accuracy=(
+                float(s["reference_accuracy"])
+                if s.get("reference_accuracy") is not None else None
+            ),
+            requires_repro=s.get("requires_repro"),
         )
         for s in data.get("suites", [])
     ]
@@ -162,6 +186,39 @@ def _fit_scaler_train_only(X_train: np.ndarray):
         f"len(X_train)={len(X_train)})."
     )
     return sc
+
+
+def _count_repro_completions(
+    layout: paths_mod.RunLayout,
+    required_suite: str,
+    feature_mode: str,
+) -> int:
+    """Count ``completed`` cnn_gru rows for the given suite and mode.
+
+    Reads persisted ``status.json`` files under
+    ``experiments/<suite>/<split>/<arm>/seed_*``. Any ``cnn_gru*`` arm
+    running against ``feature_mode`` counts. This is the gate the
+    ``ota_ablation`` profile checks before it will run — the gate must
+    NOT rely on in-memory state so a resumed run behaves identically.
+    """
+    root = layout.experiments / required_suite
+    if not root.exists():
+        return 0
+    n = 0
+    for status_path in root.glob("*/*/seed_*/status.json"):
+        arm = status_path.parent.parent.name
+        if not arm.startswith("cnn_gru"):
+            continue
+        s = status_mod.read_status(status_path) or {}
+        if s.get("status") != "completed":
+            continue
+        try:
+            spec = arms_mod.get_arm(arm)
+        except KeyError:
+            continue
+        if spec.feature_mode == feature_mode:
+            n += 1
+    return n
 
 
 # ─── Suite execution ────────────────────────────────────────────────────────
@@ -244,13 +301,39 @@ def _make_splits(
 def _build_feature_bundle(
     profile: Profile,
     records: list[manifest_mod.RecordingRecord],
-    feature_mode: str,
-    dfs_bins: str,
+    suite: "ProfileSuite",
     log: Log,
-) -> features_mod.FeatureBundle:
+) -> "features_mod.FeatureBundle | tensor_mod.UnavailableFeatureBundle":
+    feature_mode = suite.feature_mode
+    dfs_bins = suite.dfs_bins
     if profile.use_synthetic:
+        if tensor_mod.is_tensor_mode(feature_mode):
+            cfg = tensor_mod.TensorConfig(
+                T=suite.tensor_T, F=suite.tensor_F, t0=suite.tensor_t0,
+                variable_length_policy=suite.variable_length_policy,
+            )
+            bundle = tensor_mod.synthetic_tensor_bundle_from_records(
+                records, feature_mode=feature_mode, config=cfg,
+            )
+            log(f"[features] SYNTHETIC tensor bundle: mode={feature_mode} "
+                f"X={bundle.X.shape}")
+            return bundle
         _, bundle = features_mod.synthetic_fixture()
         log(f"[features] SYNTHETIC bundle: X={bundle.X.shape}")
+        return bundle
+    if tensor_mod.is_tensor_mode(feature_mode):
+        cfg = tensor_mod.TensorConfig(
+            T=suite.tensor_T, F=suite.tensor_F, t0=suite.tensor_t0,
+            variable_length_policy=suite.variable_length_policy,
+        )
+        log(f"[features] building tensor mode={feature_mode} config={cfg.to_dict()} "
+            f"n_records={len(records)} "
+            f"cache_id={tensor_mod.tensor_cache_id(feature_mode, cfg, [r.sample_id for r in records])}")
+        bundle = tensor_mod.build_tensor_features(records, feature_mode, cfg)
+        if isinstance(bundle, tensor_mod.UnavailableFeatureBundle):
+            log(f"[features] UNAVAILABLE tensor mode={feature_mode}: {bundle.reason}")
+            return bundle
+        log(f"[features] built tensor X={bundle.X.shape} mode={feature_mode}")
         return bundle
     log(f"[features] building feature_mode={feature_mode} dfs_bins={dfs_bins} "
         f"n_records={len(records)}")
@@ -377,6 +460,7 @@ def _run_suite(
     force: bool,
     gesture_set: gs_mod.GestureSet,
     dedup_state: dict[str, "dedup_mod.DedupResult"],
+    known_fingerprints: dict[str, str],
 ) -> tuple[list[dict], int]:
     """Return (index_rows, n_required_missing).
 
@@ -385,14 +469,27 @@ def _run_suite(
     is the number the top-level exit code depends on, so a split-level
     skip in a required suite propagates the same way as an arm-level
     failure.
+
+    ``known_fingerprints`` maps ``fingerprint -> canonical_split_id`` for
+    canonical splits from every earlier suite in this run. It is mutated
+    in place with any newly-canonical splits from this suite so
+    subsequent suites see them.
     """
     rows: list[dict] = []
 
     concrete_splits, split_errors = _make_splits(
         records, suite, profile, layout.splits, log,
     )
-    dedup_result = dedup_mod.dedup_splits(concrete_splits)
+    dedup_result = dedup_mod.dedup_splits(
+        concrete_splits, known_fingerprints=known_fingerprints,
+    )
     dedup_state[suite.name] = dedup_result
+    # Promote every canonical split from THIS suite into the shared
+    # fingerprint registry so later suites treat identical membership as
+    # ``alias_of`` this suite's canonical id, not as a new evaluation.
+    for sid, split in dedup_result.canonical:
+        fp = dedup_result.fingerprints.get(sid) or dedup_mod.split_fingerprint(split)
+        known_fingerprints.setdefault(fp, sid)
     canonical_ids = {sid for sid, _ in dedup_result.canonical}
 
     # Every skipped split still produces one ``unavailable`` row per
@@ -450,9 +547,71 @@ def _run_suite(
         return rows, (len(rows) if suite.required else 0)
 
     bundle = _build_feature_bundle(
-        profile, records, suite.feature_mode, suite.dfs_bins, log,
+        profile, records, suite, log,
     )
     n_failed = 0
+
+    # If the tensor feature source data isn't present, enrol every
+    # experiment in this suite as ``unavailable`` with the exact reason
+    # returned by the builder. Never substitute an approximation.
+    if isinstance(bundle, tensor_mod.UnavailableFeatureBundle):
+        reason = f"tensor feature unavailable ({bundle.feature_mode}): {bundle.reason}"
+        log(f"[features] SUITE UNAVAILABLE: {reason}")
+        for split_id, _ in dedup_result.canonical:
+            for arm_name in suite.arms:
+                for seed in seeds:
+                    exp_dir = layout.experiment_dir(
+                        suite.name, split_id, arm_name, seed,
+                    )
+                    exp_dir.mkdir(parents=True, exist_ok=True)
+                    status_mod.write_status(
+                        exp_dir / "status.json",
+                        status="unavailable", reason=reason,
+                    )
+                    rows.append({
+                        "suite": suite.name, "split_id": split_id,
+                        "arm": arm_name, "seed": seed,
+                        "status": "unavailable", "reason": reason,
+                    })
+        if suite.required:
+            return rows, sum(1 for r in rows if r["status"] != "completed")
+        return rows, 0
+
+    # ota_ablation gate: refuse this suite if the paired reproduction
+    # suite (same feature_mode) has NOT completed any cnn_gru rows in
+    # this run. The gate reads directly from previously-persisted
+    # experiment rows so it cannot be lied to. See docs section 4.
+    if suite.requires_repro:
+        completed = _count_repro_completions(
+            layout, required_suite=suite.requires_repro,
+            feature_mode=suite.feature_mode,
+        )
+        if completed == 0:
+            reason = (
+                f"ota_ablation refused: reproduction gate for "
+                f"feature_mode={suite.feature_mode!r} not completed "
+                f"(suite={suite.requires_repro!r} has 0 completed cnn_gru arms)."
+            )
+            log(f"[gate] {suite.name}: {reason}")
+            for split_id, _ in dedup_result.canonical:
+                for arm_name in suite.arms:
+                    for seed in seeds:
+                        exp_dir = layout.experiment_dir(
+                            suite.name, split_id, arm_name, seed,
+                        )
+                        exp_dir.mkdir(parents=True, exist_ok=True)
+                        status_mod.write_status(
+                            exp_dir / "status.json",
+                            status="unavailable", reason=reason,
+                        )
+                        rows.append({
+                            "suite": suite.name, "split_id": split_id,
+                            "arm": arm_name, "seed": seed,
+                            "status": "unavailable", "reason": reason,
+                        })
+            if suite.required:
+                return rows, sum(1 for r in rows if r["status"] != "completed")
+            return rows, 0
 
     # DA/DG suites are gated: they never execute unless tasks 1-3 are
     # marked ready in the profile AND the source environments actually
@@ -505,19 +664,41 @@ def _run_suite(
                     })
             continue
 
-        sc = _fit_scaler_train_only(X_tr)
-        X_tr_s = sc.transform(X_tr).astype(np.float32)
-        X_va_s = sc.transform(X_va).astype(np.float32)
-        X_te_s = sc.transform(X_te).astype(np.float32)
+        sc = None
+        if X_tr.ndim == 2:
+            sc = _fit_scaler_train_only(X_tr)
+            X_tr_s = sc.transform(X_tr).astype(np.float32)
+            X_va_s = sc.transform(X_va).astype(np.float32)
+            X_te_s = sc.transform(X_te).astype(np.float32)
+        else:
+            # Structure-preserving tensor bundles are pre-normalised at
+            # build time (BVP per-snapshot L1; DFS/CSI temporal resample).
+            # StandardScaler across pixel-locations would destroy the local
+            # structure the CNN exists to exploit, so we skip it here and
+            # log the bypass so it is visible in audit.
+            log(
+                f"[scaler] BYPASS on tensor bundle X.shape={X_tr.shape} "
+                f"mode={bundle.feature_mode}"
+            )
+            X_tr_s = X_tr.astype(np.float32)
+            X_va_s = X_va.astype(np.float32)
+            X_te_s = X_te.astype(np.float32)
         n_classes = int(np.unique(bundle.y).size)
 
         # Per-split chance + majority baselines under the ACTIVE gesture
         # set. Never inherited across variants — every split records its
         # own baseline computed on this test fold. Also record a
         # source-vs-target feature-statistic shift diagnostic; the fit
-        # is train-fold only.
+        # is train-fold only. Tensor bundles are flattened only for the
+        # diagnostic — the arms still see the rank-4 tensor.
         baseline_payload = gs_mod.per_split_baseline(y_te.tolist(), gesture_set)
-        feature_shift = collapse_mod.compute_feature_shift_stats(X_tr, X_te)
+        if X_tr.ndim == 2:
+            feature_shift = collapse_mod.compute_feature_shift_stats(X_tr, X_te)
+        else:
+            feature_shift = collapse_mod.compute_feature_shift_stats(
+                X_tr.reshape(X_tr.shape[0], -1),
+                X_te.reshape(X_te.shape[0], -1),
+            )
         baseline_out = layout.summaries / "per_split_baselines" / f"{split_id}.json"
         baseline_out.parent.mkdir(parents=True, exist_ok=True)
         baseline_out.write_text(json.dumps(
@@ -917,6 +1098,7 @@ def run(argv: list[str] | None = None) -> int:
     total_failed = 0
     total_required_failed = 0
     dedup_state: dict[str, dedup_mod.DedupResult] = {}
+    known_fingerprints: dict[str, str] = {}
     for suite in profile.suites:
         log(f"[suite:{suite.name}] required={suite.required} arms={suite.arms}")
         rows, n_failed = _run_suite(
@@ -925,6 +1107,7 @@ def run(argv: list[str] | None = None) -> int:
             log=log, force=args.force,
             gesture_set=gesture_set,
             dedup_state=dedup_state,
+            known_fingerprints=known_fingerprints,
         )
         all_rows.extend(rows)
         total_failed += n_failed
@@ -972,6 +1155,7 @@ def run(argv: list[str] | None = None) -> int:
     )
 
     log(f"[summary] {counts}")
+    from experiments import reproduction_report as repro_mod
     if total_required_failed:
         status_mod.write_status(
             layout.status, status="failed",
@@ -980,11 +1164,15 @@ def run(argv: list[str] | None = None) -> int:
         )
         report_path = report_mod.write_run_report(layout)
         log(f"[report] wrote {report_path}")
+        repro_path = repro_mod.write_reproduction_report(layout)
+        log(f"[report] wrote {repro_path}")
         return 1
     status_mod.write_status(layout.status, status="completed",
                              extra={"counts": counts})
     report_path = report_mod.write_run_report(layout)
     log(f"[report] wrote {report_path}")
+    repro_path = repro_mod.write_reproduction_report(layout)
+    log(f"[report] wrote {repro_path}")
     return 0
 
 

@@ -191,7 +191,7 @@ def test_feature_mode_mismatch_enrols_unavailable(tmp_path, monkeypatch):
         )
         return records
 
-    def _fake_bundle(profile, records_, feature_mode, dfs_bins, log):
+    def _fake_bundle(profile, records_, suite, log):
         return bundle_non_synth
 
     monkeypatch.setattr(runner_mod, "_build_manifest", _fake_manifest)

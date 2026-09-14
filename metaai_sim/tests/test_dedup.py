@@ -58,3 +58,47 @@ def test_manifest_dict_carries_alias_map(records) -> None:
     assert payload["aliases"] == {"second": "first"}
     assert payload["n_unique"] == 1
     assert payload["n_aliases"] == 1
+
+
+def test_cross_suite_aliasing_via_known_fingerprints(records) -> None:
+    """Regression: split_dedup.json previously showed identical
+    fingerprints across suites (e.g. loro_room_2 == heldout_test_20181118
+    == cross_room_1_to_2 all sharing 8b6665be23d93096) while every
+    suite still reported n_aliases == 0. Detected but not acted on.
+
+    With ``known_fingerprints`` threaded across suites, the second suite
+    must record the collision as ``alias_of`` and exclude the alias from
+    its canonical count.
+    """
+    # Suite 1: canonical.
+    a = splits.indomain_grouped(records, date="20181109", seed=42)
+    r1 = dedup.dedup_splits([("suite1_indomain", a)])
+    # The registry maps fingerprint -> canonical split id, mirroring what
+    # the runner threads across suites.
+    known: dict[str, str] = {
+        dedup.split_fingerprint(split): sid for sid, split in r1.canonical
+    }
+
+    # Suite 2: identical membership under a different suite/split name.
+    b = splits.indomain_grouped(records, date="20181109", seed=42)
+    r2 = dedup.dedup_splits(
+        [("suite2_indomain", b)], known_fingerprints=known,
+    )
+    assert r2.canonical == []
+    assert r2.aliases == {"suite2_indomain": "suite1_indomain"}
+    assert r2.n_unique == 0
+    assert r2.n_aliases == 1
+
+
+def test_cross_suite_registry_is_stable(records) -> None:
+    """Registering the canonical fingerprint means later dedup passes on
+    the SAME split id no longer count it as a fresh canonical row."""
+    a = splits.indomain_grouped(records, date="20181109", seed=42)
+    known: dict[str, str] = {}
+    r1 = dedup.dedup_splits([("a", a)], known_fingerprints=known)
+    # simulate the runner promoting canonical fps
+    for sid, split in r1.canonical:
+        known[dedup.split_fingerprint(split)] = sid
+    r2 = dedup.dedup_splits([("a_again", a)], known_fingerprints=known)
+    assert r2.canonical == []
+    assert r2.aliases == {"a_again": "a"}

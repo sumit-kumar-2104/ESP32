@@ -41,7 +41,7 @@ class ArmSpec:
     name: str
     feature_mode: str            # "raw" | "amp" | "dfs_spec" | ...
     dfs_bins: str = "full"       # only relevant for dfs_spec
-    kind: str = "logreg"         # "logreg" | "digital_mlp" | "ota"
+    kind: str = "logreg"         # "logreg" | "digital_mlp" | "ota" | "cnn_gru"
     hook: str = "none"           # "none" | "R1" | "R2"  (only when kind == "ota")
     epochs: int = 40
     batch_size: int = 128
@@ -53,6 +53,15 @@ class ArmSpec:
     qgrad_scale: float = 8.0
     lr_complex: float | None = None
     ste: str = "identity"
+    # CNN-GRU knobs. Ignored unless kind == "cnn_gru".
+    cnn_filters: int = 16
+    cnn_dense: int = 64
+    cnn_gru_dim: int = 128
+    cnn_dropout: float = 0.5
+    # Composable OTA constraint stack applied to a cnn_gru head. When
+    # ``constraint`` is not None the runner substitutes the head with a
+    # ConstrainedHead; ``constraint_label`` shows up in status.json.
+    constraint: str | None = None    # None | "unconstrained" | "complex_only" | ...
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,6 +106,26 @@ register(ArmSpec("ota_dfs_R1", feature_mode="dfs_spec", dfs_bins="full",
 register(ArmSpec("ota_dfs_R2", feature_mode="dfs_spec", dfs_bins="full",
                  kind="ota", hook="R2", qgrad_scale=8.0, lr_complex=5e-3,
                  ste="hardtanh"))
+
+
+# ─── CNN-GRU backbone arms (Widar3.0 reproduction) ──────────────────────────
+# Structure-preserving 3-D input tensors: csi_tensor / dfs_tensor / bvp_tensor.
+# The backbone is unchanged across tensor modes; only the input shape differs.
+# Every constraint variant reuses the backbone and swaps only the head.
+
+for _rep in ("csi_tensor", "dfs_tensor", "bvp_tensor"):
+    register(ArmSpec(f"cnn_gru_{_rep}", feature_mode=_rep,
+                     kind="cnn_gru", epochs=60, batch_size=64, lr=1e-3,
+                     weight_decay=0.0, dropout=0.5, patience=12))
+    for _c in ("unconstrained", "complex_only", "magnitude_only",
+               "quantize_only", "full_ota", "full_ota_R1", "full_ota_R2"):
+        register(ArmSpec(
+            f"cnn_gru_{_rep}_{_c}",
+            feature_mode=_rep,
+            kind="cnn_gru", epochs=60, batch_size=64, lr=1e-3,
+            weight_decay=0.0, dropout=0.5, patience=12,
+            constraint=_c,
+        ))
 
 
 # ─── Training helpers ───────────────────────────────────────────────────────
@@ -372,6 +401,75 @@ def _train_ota(spec, **kw):
     )
 
 
+def _train_cnn_gru(spec, **kw):
+    """Widar3.0 CNN-GRU backbone; optional OTA constraint stack on head."""
+    import torch.optim as optim
+    from models.cnn_gru import CNNGRUBackbone, CNNGRUConfig
+    from models.constraints import (
+        ConstraintConfig, apply_constraints_to_cnn_gru,
+    )
+
+    X_train = kw["X_train"]
+    if X_train.ndim != 4:
+        raise ValueError(
+            f"cnn_gru expects a rank-4 input bundle (N, D1, D2, D3), got "
+            f"shape={X_train.shape} — a flat feature mode was routed to a "
+            f"tensor arm. Fix the profile/feature_mode wiring."
+        )
+    input_shape = tuple(int(x) for x in X_train.shape[1:])
+    n_classes = kw["n_classes"]
+    cnn_cfg = CNNGRUConfig(
+        n_filters=spec.cnn_filters, dense_dim=spec.cnn_dense,
+        gru_dim=spec.cnn_gru_dim, dropout=spec.cnn_dropout,
+    )
+
+    constraint_label = spec.constraint
+
+    def _pick_constraint(label: str | None) -> ConstraintConfig | None:
+        if not label or label == "none":
+            return None
+        return {
+            "unconstrained": ConstraintConfig.unconstrained,
+            "complex_only": ConstraintConfig.complex_only,
+            "magnitude_only": ConstraintConfig.magnitude_only,
+            "quantize_only": ConstraintConfig.quantize_only,
+            "full_ota": ConstraintConfig.full_ota,
+            "full_ota_R1": ConstraintConfig.r1,
+            "full_ota_R2": ConstraintConfig.r2,
+        }[label]()
+
+    constraint_cfg = _pick_constraint(constraint_label)
+
+    def build_model():
+        m = CNNGRUBackbone(
+            input_shape=input_shape,
+            n_classes=n_classes,
+            rep_kind=spec.feature_mode,
+            config=cnn_cfg,
+        )
+        if constraint_cfg is not None:
+            apply_constraints_to_cnn_gru(m, constraint_cfg)
+        return m
+
+    def build_optimizer(model):
+        wd = (
+            constraint_cfg.weight_decay
+            if constraint_cfg is not None and constraint_cfg.weight_decay > 0
+            else spec.weight_decay
+        )
+        return optim.Adam(model.parameters(), lr=spec.lr, weight_decay=wd)
+
+    summary = _train_torch(
+        spec, build_model, build_optimizer,
+        complex_input=False, **kw,
+    )
+    if constraint_cfg is not None:
+        summary["constraint_label"] = constraint_cfg.label
+    else:
+        summary["constraint_label"] = "none"
+    return summary
+
+
 def run_arm(
     spec: ArmSpec,
     *,
@@ -402,4 +500,6 @@ def run_arm(
         return _train_digital_mlp(spec, **common)
     if spec.kind == "ota":
         return _train_ota(spec, **common)
+    if spec.kind == "cnn_gru":
+        return _train_cnn_gru(spec, **common)
     raise ValueError(f"unknown arm kind {spec.kind!r}")

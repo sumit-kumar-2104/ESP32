@@ -1,0 +1,186 @@
+# OTA constraint ablation — per representation, per constraint.
+#
+# Prerequisite: the reproduction gate must have completed at least one
+# `cnn_gru_<mode>` row for the corresponding tensor mode in this run
+# (or a resumed one). The runner reads persisted status.json files and
+# refuses the ablation suite if the gate is not met, with the exact
+# reason echoed into status.json and RUN_SUMMARY.
+#
+# Research question (Section 4 of the task spec): does the physical
+# constraint cost more on a domain-independent representation (BVP) than
+# on a domain-dependent one (raw CSI)? Our earlier flat-feature evidence
+# hints at a large swing — the OTA penalty is 8.74pp on raw amplitude
+# but 25.41pp on DFS. Answered from persisted predictions only.
+
+name: ota_ablation
+label: "OTA constraint ablation per tensor representation (gated by repro)"
+use_synthetic: false
+dates: ["20181109", "20181118"]
+seeds: [42, 43, 44]
+quality_policy: reject
+min_packets: 64
+read_packet_counts: false
+
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: "matches core profile; see docs/gesture_set_evidence.md"
+  evidence: "docs/gesture_set_evidence.md"
+
+tasks_1_3_ready: false
+
+# The reproduction suites need to run FIRST (in the same run tree) so
+# the gate below finds them. Keep them here so `ota_ablation` is
+# self-contained: a fresh run tree can execute both the repro and the
+# ablation in a single invocation.
+suites:
+  # ─── Repro gate for each mode (must complete before ablation runs) ────
+  - name: repro_csi_tensor
+    required: false
+    kind: reproduction
+    feature_mode: csi_tensor
+    tensor_T: 32
+    reference_accuracy: 40.2
+    arms: [cnn_gru_csi_tensor]
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  - name: repro_dfs_tensor
+    required: false
+    kind: reproduction
+    feature_mode: dfs_tensor
+    tensor_T: 32
+    tensor_F: 16
+    reference_accuracy: 77.8
+    arms: [cnn_gru_dfs_tensor]
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  - name: repro_bvp_tensor
+    required: false
+    kind: reproduction
+    feature_mode: bvp_tensor
+    tensor_t0: 20
+    reference_accuracy: 92.4
+    arms: [cnn_gru_bvp_tensor]
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  # ─── Ablation suites (gated) ──────────────────────────────────────────
+  - name: ota_ablation_csi_tensor
+    required: false
+    kind: ota_ablation
+    feature_mode: csi_tensor
+    tensor_T: 32
+    requires_repro: repro_csi_tensor
+    arms:
+      - cnn_gru_csi_tensor_unconstrained
+      - cnn_gru_csi_tensor_complex_only
+      - cnn_gru_csi_tensor_magnitude_only
+      - cnn_gru_csi_tensor_quantize_only
+      - cnn_gru_csi_tensor_full_ota
+      - cnn_gru_csi_tensor_full_ota_R1
+      - cnn_gru_csi_tensor_full_ota_R2
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  - name: ota_ablation_dfs_tensor
+    required: false
+    kind: ota_ablation
+    feature_mode: dfs_tensor
+    tensor_T: 32
+    tensor_F: 16
+    requires_repro: repro_dfs_tensor
+    arms:
+      - cnn_gru_dfs_tensor_unconstrained
+      - cnn_gru_dfs_tensor_complex_only
+      - cnn_gru_dfs_tensor_magnitude_only
+      - cnn_gru_dfs_tensor_quantize_only
+      - cnn_gru_dfs_tensor_full_ota
+      - cnn_gru_dfs_tensor_full_ota_R1
+      - cnn_gru_dfs_tensor_full_ota_R2
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42
+
+  - name: ota_ablation_bvp_tensor
+    required: false
+    kind: ota_ablation
+    feature_mode: bvp_tensor
+    tensor_t0: 20
+    requires_repro: repro_bvp_tensor
+    arms:
+      - cnn_gru_bvp_tensor_unconstrained
+      - cnn_gru_bvp_tensor_complex_only
+      - cnn_gru_bvp_tensor_magnitude_only
+      - cnn_gru_bvp_tensor_quantize_only
+      - cnn_gru_bvp_tensor_full_ota
+      - cnn_gru_bvp_tensor_full_ota_R1
+      - cnn_gru_bvp_tensor_full_ota_R2
+    splits:
+      - kind: indomain_grouped
+        id: indomain_20181109
+        date: "20181109"
+        val_frac: 0.15
+        test_frac: 0.15
+        seed: 42
+      - kind: cross_room
+        id: cross_room_1_to_2
+        source_room: 1
+        target_room: 2
+        val_frac: 0.15
+        seed: 42

@@ -71,10 +71,19 @@ class DedupResult:
 
 def dedup_splits(
     concrete: Sequence[tuple[str, Split]],
+    known_fingerprints: dict[str, str] | None = None,
 ) -> DedupResult:
-    """Return the canonical split list and the alias mapping."""
+    """Return the canonical split list and the alias mapping.
+
+    ``known_fingerprints`` maps ``fingerprint -> canonical_split_id`` for
+    splits that were already deduplicated in an EARLIER pass (e.g. a
+    previous suite in the same run). Any concrete split whose
+    fingerprint matches an entry in that map is recorded as
+    ``alias_of`` the earlier canonical id — so cross-suite duplicates
+    are caught, not just within-suite ones.
+    """
     canonical: list[tuple[str, Split]] = []
-    fp_to_canonical: dict[str, str] = {}
+    fp_to_canonical: dict[str, str] = dict(known_fingerprints or {})
     aliases: dict[str, str] = {}
     fingerprints: dict[str, str] = {}
     for split_id, split in concrete:
