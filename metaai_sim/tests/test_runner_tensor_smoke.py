@@ -172,3 +172,100 @@ def test_two_feature_modes_on_same_split_both_train(tmp_path: Path) -> None:
         assert s["status"] == "completed", (
             f"{suite}/{arm} expected completed, got {s}"
         )
+
+
+def _write_ablation_gate_smoke_profile(path: Path) -> Path:
+    """Two suites, same feature_mode, DIFFERENT arm sets — the
+    ota_ablation shape. On the 16 Sept server run, the ablation suite
+    lost every split to alias_of the earlier repro suite even though
+    the arm sets did not overlap, so none of the constraint variants
+    trained. Registry must be keyed by (feature_mode, arms_set)."""
+    path.write_text(
+        """
+name: ablation_arms_smoke
+label: "synthetic smoke: repro + ablation on same mode with different arms"
+use_synthetic: true
+dates: []
+seeds: [42]
+quality_policy: reject
+min_packets: 8
+read_packet_counts: false
+
+gesture_set:
+  ids: [1, 2, 3, 4, 5, 6]
+  label: "six-class-default"
+  justification: "smoke; matches core"
+  evidence: "docs/gesture_set_evidence.md"
+
+tasks_1_3_ready: false
+
+suites:
+  - name: repro_dfs_tensor_smoke
+    required: true
+    kind: reproduction
+    feature_mode: dfs_tensor
+    tensor_T: 8
+    tensor_F: 4
+    reference_accuracy: 77.8
+    arms: [cnn_gru_dfs_tensor]
+    splits:
+      - kind: indomain_grouped
+        id: smoke_indomain
+        date: "20181109"
+        val_frac: 0.2
+        test_frac: 0.2
+        seed: 42
+  - name: ota_ablation_dfs_tensor_smoke
+    required: true
+    kind: ota_ablation
+    feature_mode: dfs_tensor
+    tensor_T: 8
+    tensor_F: 4
+    requires_repro: repro_dfs_tensor_smoke
+    arms:
+      - cnn_gru_dfs_tensor_unconstrained
+      - cnn_gru_dfs_tensor_complex_only
+    splits:
+      - kind: indomain_grouped
+        id: smoke_indomain
+        date: "20181109"
+        val_frac: 0.2
+        test_frac: 0.2
+        seed: 42
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_ablation_arms_train_when_repro_shares_the_split(tmp_path: Path) -> None:
+    """Regression for the 16 Sept ablation aliasing bug: ota_ablation
+    suites that share splits + feature_mode with a repro suite must
+    still train their DIFFERENT arms, not be aliased away."""
+    profile_path = _write_ablation_gate_smoke_profile(
+        tmp_path / "ablation_arms.yaml",
+    )
+    rc = runner_mod.run([
+        "--profile", str(profile_path),
+        "--device", "cpu",
+        "--results-root", str(tmp_path),
+        "--run-id", "ablation_arms_smoke",
+    ])
+    assert rc == 0, f"ablation-arms smoke exit code {rc}"
+    root = tmp_path / "ablation_arms_smoke"
+    for suite, arm in (
+        ("repro_dfs_tensor_smoke", "cnn_gru_dfs_tensor"),
+        ("ota_ablation_dfs_tensor_smoke", "cnn_gru_dfs_tensor_unconstrained"),
+        ("ota_ablation_dfs_tensor_smoke", "cnn_gru_dfs_tensor_complex_only"),
+    ):
+        status_path = (
+            root / "experiments" / suite / "smoke_indomain" / arm
+            / "seed_42" / "status.json"
+        )
+        assert status_path.exists(), (
+            f"missing status.json for {suite}/{arm}"
+        )
+        s = json.loads(status_path.read_text(encoding="utf-8"))
+        assert s["status"] == "completed", (
+            f"{suite}/{arm} expected completed, got {s}"
+        )

@@ -460,7 +460,7 @@ def _run_suite(
     force: bool,
     gesture_set: gs_mod.GestureSet,
     dedup_state: dict[str, "dedup_mod.DedupResult"],
-    known_fingerprints: dict[str, dict[str, str]],
+    known_fingerprints: dict[tuple[str, tuple[str, ...]], dict[str, str]],
 ) -> tuple[list[dict], int]:
     """Return (index_rows, n_required_missing).
 
@@ -470,20 +470,23 @@ def _run_suite(
     skip in a required suite propagates the same way as an arm-level
     failure.
 
-    ``known_fingerprints`` maps ``feature_mode -> {fingerprint ->
-    canonical_split_id}``. Aliasing is scoped to the SAME feature
-    representation: two suites that share ``(train, val, test)``
-    membership under different tensor modes (e.g. csi_tensor vs
-    dfs_tensor vs bvp_tensor) are independent evaluations, not
-    duplicates. The registry is mutated in place with any newly-canonical
-    splits from this suite so subsequent same-mode suites see them.
+    ``known_fingerprints`` maps ``(feature_mode, arms_tuple) ->
+    {fingerprint -> canonical_split_id}``. Aliasing fires only when a
+    later suite matches BOTH the tensor representation AND the arm set
+    of an earlier canonical. Two suites sharing records under different
+    feature modes are independent evaluations; two suites sharing
+    records + feature mode with different arms (e.g. `repro_<mode>` with
+    one plain arm vs `ota_ablation_<mode>` with seven constraint
+    variants) are also independent evaluations. Within-suite duplicates
+    and same-mode + same-arms cross-suite duplicates still alias.
     """
     rows: list[dict] = []
 
     concrete_splits, split_errors = _make_splits(
         records, suite, profile, layout.splits, log,
     )
-    mode_registry = known_fingerprints.setdefault(suite.feature_mode, {})
+    registry_key = (suite.feature_mode, tuple(sorted(suite.arms)))
+    mode_registry = known_fingerprints.setdefault(registry_key, {})
     dedup_result = dedup_mod.dedup_splits(
         concrete_splits, known_fingerprints=mode_registry,
     )
@@ -1099,7 +1102,7 @@ def run(argv: list[str] | None = None) -> int:
     total_failed = 0
     total_required_failed = 0
     dedup_state: dict[str, dedup_mod.DedupResult] = {}
-    known_fingerprints: dict[str, dict[str, str]] = {}
+    known_fingerprints: dict[tuple[str, tuple[str, ...]], dict[str, str]] = {}
     for suite in profile.suites:
         log(f"[suite:{suite.name}] required={suite.required} arms={suite.arms}")
         rows, n_failed = _run_suite(
