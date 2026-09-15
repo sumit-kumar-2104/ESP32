@@ -102,3 +102,43 @@ def test_cross_suite_registry_is_stable(records) -> None:
     r2 = dedup.dedup_splits([("a_again", a)], known_fingerprints=known)
     assert r2.canonical == []
     assert r2.aliases == {"a_again": "a"}
+
+
+def test_dedup_registry_scoped_per_feature_mode(records) -> None:
+    """Regression: on the 15 Sept server run, repro_dfs_tensor and
+    repro_bvp_tensor lost every split to alias_of the earlier
+    repro_csi_tensor suite because the shared fingerprint registry was
+    keyed only on (train, val, test) membership. Two suites with the same
+    records under DIFFERENT feature representations are independent
+    evaluations, not duplicates.
+
+    The runner now keys the registry by ``(feature_mode, fingerprint)``.
+    This test mirrors that discipline at the dedup layer: separate
+    fingerprint dictionaries per mode collide only within the same mode.
+    """
+    a_csi = splits.indomain_grouped(records, date="20181109", seed=42)
+    a_dfs = splits.indomain_grouped(records, date="20181109", seed=42)
+    per_mode: dict[str, dict[str, str]] = {}
+
+    csi_known = per_mode.setdefault("csi_tensor", {})
+    r_csi = dedup.dedup_splits(
+        [("csi_indomain", a_csi)], known_fingerprints=csi_known,
+    )
+    for sid, split in r_csi.canonical:
+        csi_known[dedup.split_fingerprint(split)] = sid
+
+    dfs_known = per_mode.setdefault("dfs_tensor", {})
+    r_dfs = dedup.dedup_splits(
+        [("dfs_indomain", a_dfs)], known_fingerprints=dfs_known,
+    )
+
+    assert r_csi.n_unique == 1 and r_csi.n_aliases == 0
+    assert r_dfs.n_unique == 1 and r_dfs.n_aliases == 0, (
+        "different feature_mode must not alias against another mode's canonical"
+    )
+    # Within the SAME mode, a repeat of the exact split still aliases.
+    r_csi_dup = dedup.dedup_splits(
+        [("csi_indomain_repeat", a_csi)], known_fingerprints=csi_known,
+    )
+    assert r_csi_dup.n_unique == 0
+    assert r_csi_dup.aliases == {"csi_indomain_repeat": "csi_indomain"}

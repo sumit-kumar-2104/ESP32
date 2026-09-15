@@ -460,7 +460,7 @@ def _run_suite(
     force: bool,
     gesture_set: gs_mod.GestureSet,
     dedup_state: dict[str, "dedup_mod.DedupResult"],
-    known_fingerprints: dict[str, str],
+    known_fingerprints: dict[str, dict[str, str]],
 ) -> tuple[list[dict], int]:
     """Return (index_rows, n_required_missing).
 
@@ -470,26 +470,27 @@ def _run_suite(
     skip in a required suite propagates the same way as an arm-level
     failure.
 
-    ``known_fingerprints`` maps ``fingerprint -> canonical_split_id`` for
-    canonical splits from every earlier suite in this run. It is mutated
-    in place with any newly-canonical splits from this suite so
-    subsequent suites see them.
+    ``known_fingerprints`` maps ``feature_mode -> {fingerprint ->
+    canonical_split_id}``. Aliasing is scoped to the SAME feature
+    representation: two suites that share ``(train, val, test)``
+    membership under different tensor modes (e.g. csi_tensor vs
+    dfs_tensor vs bvp_tensor) are independent evaluations, not
+    duplicates. The registry is mutated in place with any newly-canonical
+    splits from this suite so subsequent same-mode suites see them.
     """
     rows: list[dict] = []
 
     concrete_splits, split_errors = _make_splits(
         records, suite, profile, layout.splits, log,
     )
+    mode_registry = known_fingerprints.setdefault(suite.feature_mode, {})
     dedup_result = dedup_mod.dedup_splits(
-        concrete_splits, known_fingerprints=known_fingerprints,
+        concrete_splits, known_fingerprints=mode_registry,
     )
     dedup_state[suite.name] = dedup_result
-    # Promote every canonical split from THIS suite into the shared
-    # fingerprint registry so later suites treat identical membership as
-    # ``alias_of`` this suite's canonical id, not as a new evaluation.
     for sid, split in dedup_result.canonical:
         fp = dedup_result.fingerprints.get(sid) or dedup_mod.split_fingerprint(split)
-        known_fingerprints.setdefault(fp, sid)
+        mode_registry.setdefault(fp, sid)
     canonical_ids = {sid for sid, _ in dedup_result.canonical}
 
     # Every skipped split still produces one ``unavailable`` row per
@@ -1098,7 +1099,7 @@ def run(argv: list[str] | None = None) -> int:
     total_failed = 0
     total_required_failed = 0
     dedup_state: dict[str, dedup_mod.DedupResult] = {}
-    known_fingerprints: dict[str, str] = {}
+    known_fingerprints: dict[str, dict[str, str]] = {}
     for suite in profile.suites:
         log(f"[suite:{suite.name}] required={suite.required} arms={suite.arms}")
         rows, n_failed = _run_suite(
