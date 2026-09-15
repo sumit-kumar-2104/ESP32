@@ -1,9 +1,9 @@
 """Atomic status.json writer.
 
 Each experiment has exactly one status.json. Statuses are constrained to
-{pending, running, completed, failed, unavailable}. Every write is atomic
-(tmp file + os.replace) so a crash mid-write never leaves a corrupted or
-inconsistent file that could be mis-read as ``completed``.
+{pending, running, completed, failed, unavailable, alias_of}. Every write
+is atomic (tmp file + os.replace) so a crash mid-write never leaves a
+corrupted or inconsistent file that could be mis-read as ``completed``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_STATUSES = ("pending", "running", "completed", "failed", "unavailable")
+VALID_STATUSES = (
+    "pending", "running", "completed", "failed", "unavailable", "alias_of",
+)
 
 
 def _now_iso() -> str:
@@ -44,7 +46,7 @@ def write_status(
         raise ValueError(
             f"status={status!r} not in {VALID_STATUSES}"
         )
-    if status in ("failed", "unavailable") and not reason:
+    if status in ("failed", "unavailable", "alias_of") and not reason:
         raise ValueError(
             f"status={status!r} requires a non-empty reason string"
         )

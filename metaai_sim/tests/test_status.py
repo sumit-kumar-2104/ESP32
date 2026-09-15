@@ -38,6 +38,24 @@ def test_reason_required_for_failure(tmp_path: Path) -> None:
         status.write_status(p, status="failed")
     with pytest.raises(ValueError):
         status.write_status(p, status="unavailable", reason="")
+    with pytest.raises(ValueError):
+        status.write_status(p, status="alias_of")
+
+
+def test_alias_of_is_a_valid_status(tmp_path: Path) -> None:
+    """Regression: the runner writes ``alias_of`` when two configured
+    splits resolve to identical (train, val, test) membership. It must
+    be accepted here so the runner does not crash mid-suite."""
+    p = tmp_path / "s.json"
+    payload = status.write_status(
+        p, status="alias_of",
+        reason="alias_of=heldout_test_20181118: identical membership",
+        extra={"canonical_split_id": "heldout_test_20181118"},
+    )
+    assert payload["status"] == "alias_of"
+    got = status.read_status(p)
+    assert got["status"] == "alias_of"
+    assert got["canonical_split_id"] == "heldout_test_20181118"
 
 
 def test_invalid_status(tmp_path: Path) -> None:
